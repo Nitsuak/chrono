@@ -7,11 +7,11 @@ on:
       - "pychrono-*"
 
 permissions:
-  contents: write  # needed for attaching wheels to Releases
+  contents: write
 
 env:
-  PY_VER: "3.11"      # Blender 4.2/4.3 era
-  CHRONO_REF: "main"  # or use a stable tag like "9.0.1"
+  PY_VER: "3.11"      # Blender 4.2/4.3
+  CHRONO_REF: "main"  # or a release tag like "9.0.1"
 
 jobs:
   build:
@@ -23,9 +23,9 @@ jobs:
           - os: ubuntu-22.04
             triplet: linux
           - os: macos-13
-            triplet: macos-x86_64     # Intel
+            triplet: macos-x86_64
           - os: macos-14
-            triplet: macos-arm64      # Apple Silicon
+            triplet: macos-arm64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -67,7 +67,7 @@ jobs:
           brew install cmake eigen ninja
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
-          # Build SWIG 4.1.1 from source (avoids 4.3 issues with Chrono bindings)
+          # Build SWIG 4.1.1 (avoid 4.3 issues for Chrono bindings)
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
           cd swig-4.1.1
@@ -94,6 +94,11 @@ jobs:
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
             -DPython3_EXECUTABLE="$PYEXE"
 
+      - name: Show CMake Python vars (diagnostics)
+        shell: bash
+        run: |
+          cmake -L -N build | sed -n '1,200p' | grep -Ei 'python|py3' || true
+
       - name: Build
         run: cmake --build build --config Release --parallel
 
@@ -101,38 +106,43 @@ jobs:
         shell: bash
         run: |
           cmake --install build --config Release --prefix "$PWD/stage"
-          echo "Staged files (sample):"
-          find "$PWD/stage" -maxdepth 4 -type f | head -n 50
+          echo "---- sample of staged files ----"
+          find "$PWD/stage" -maxdepth 6 -type f | head -n 200 || true
 
-      # ---------- Locate staged site-packages ----------
+      # ---------- Locate staged site-packages (robust) ----------
       - name: Locate staged site-packages
         id: sp
         shell: bash
         run: |
-          mkdir -p .ci
-          # write a tiny helper (no heredocs)
-          printf '%s\n' \
-            'import os, sysconfig, sys' \
-            'base = os.path.abspath("stage")' \
-            'plat = sysconfig.get_path("platlib", vars={"base": base, "platbase": base})' \
-            'pure = sysconfig.get_path("purelib", vars={"base": base, "platbase": base})' \
-            'cands = [p for p in (plat, pure) if p and os.path.isdir(p)]' \
-            'pkg = ""' \
-            'for p in cands:' \
-            '    if os.path.isdir(os.path.join(p, "pychrono")):' \
-            '        pkg = p; break' \
-            'print(pkg)' \
-            > .ci/find_sitepkg.py
+          set -euo pipefail
+          # 1) Preferred: look for .../site-packages/pychrono
+          PKG_PATH=$(find "$PWD/stage" -type d -path "*/site-packages/pychrono" -print -quit || true)
+          # 2) Debian-style: .../dist-packages/pychrono
+          if [ -z "$PKG_PATH" ]; then
+            PKG_PATH=$(find "$PWD/stage" -type d -path "*/dist-packages/pychrono" -print -quit || true)
+          fi
+          # 3) Fallback: any 'pychrono' under stage
+          if [ -z "$PKG_PATH" ]; then
+            PKG_PATH=$(find "$PWD/stage" -type d -name "pychrono" -print -quit || true)
+          fi
+          # 4) Absolute last resort: check build tree
+          if [ -z "$PKG_PATH" ]; then
+            PKG_PATH=$(find "$PWD/build" -type d -name "pychrono" -print -quit || true)
+          fi
 
-          PKGDIR="$(python .ci/find_sitepkg.py || true)"
-          if [ -z "$PKGDIR" ]; then
-            echo "ERROR: staged pychrono not found under site-packages." >&2
-            find "$PWD/stage" -maxdepth 6 -print | head -n 200 || true
+          if [ -z "$PKG_PATH" ] || [ ! -f "$PKG_PATH/__init__.py" ]; then
+            echo "ERROR: Could not locate installed pychrono package." >&2
+            echo "-- staged tree --"
+            find "$PWD/stage" -maxdepth 6 -print | head -n 300 || true
+            echo "-- build tree (hint) --"
+            find "$PWD/build" -maxdepth 6 -print | head -n 300 || true
             exit 1
           fi
-          echo "SITEPACKAGES: $PKGDIR"
-          echo "path=$PKGDIR" >> "$GITHUB_OUTPUT"
 
+          SITEPKG="$(dirname "$PKG_PATH")"
+          echo "Detected pychrono at: $PKG_PATH"
+          echo "SITEPACKAGES resolved to: $SITEPKG"
+          echo "path=$SITEPKG" >> "$GITHUB_OUTPUT"
 
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
@@ -141,11 +151,12 @@ jobs:
           set -euo pipefail
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
+
           # Copy staged pychrono into packaging src
           mkdir -p pkg/pychrono
           cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
 
-          # Write pyproject.toml without heredocs
+          # Write pyproject.toml (no heredocs)
           printf '%s\n' \
             '[build-system]' \
             'requires = ["setuptools>=68", "wheel"]' \
@@ -158,7 +169,7 @@ jobs:
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
 
-          # Write setup.py without heredocs
+          # Write setup.py (no heredocs)
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
