@@ -127,47 +127,49 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
 
-          # Copy staged pychrono into packaging src
-          rsync -a "${{ steps.sp.outputs.path }}/pychrono/" "pkg/pychrono/" 2>/dev/null || true
-          if [ ! -d "pkg/pychrono" ] || [ -z "$(ls -A pkg/pychrono 2>/dev/null)" ]; then
-            mkdir -p pkg/pychrono
-            cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
-          fi
+          # Copy staged pychrono into packaging src (no rsync, just cp -R)
+          mkdir -p pkg/pychrono
+          cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
 
-          # Minimal packaging files
-          cat > pkg/pyproject.toml <<'TOML'
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+          # --- Write pyproject.toml without heredocs ---
+          printf '%s\n' \
+            '[build-system]' \
+            'requires = ["setuptools>=68", "wheel"]' \
+            'build-backend = "setuptools.build_meta"' \
+            '' \
+            '[project]' \
+            'name = "pychrono"' \
+            'version = "0.0.0+local"' \
+            'description = "PyChrono binary wheel (built from Project Chrono)"' \
+            'requires-python = ">=3.11,<3.12"' \
+            > pkg/pyproject.toml
 
-[project]
-name = "pychrono"
-version = "0.0.0+local"
-description = "PyChrono binary wheel (built from Project Chrono)"
-requires-python = ">=3.11,<3.12"
-TOML
-
-          cat > pkg/setup.py <<'PY'
-from setuptools import setup
-from setuptools.dist import Distribution
-class BinDist(Distribution):
-    def has_ext_modules(self):
-        return True  # mark as binary -> platform-tagged wheel
-setup(
-    name="pychrono",
-    version="0.0.0+local",
-    packages=["pychrono"],
-    package_dir={"pychrono": "pychrono"},
-    include_package_data=True,
-    distclass=BinDist,
-)
-PY
+          # --- Write setup.py without heredocs ---
+          printf '%s\n' \
+            'from setuptools import setup' \
+            'from setuptools.dist import Distribution' \
+            '' \
+            'class BinDist(Distribution):' \
+            '    def has_ext_modules(self):' \
+            '        return True  # mark wheel as binary -> platform tag' \
+            '' \
+            'setup(' \
+            '    name="pychrono",' \
+            '    version="0.0.0+local",' \
+            '    packages=["pychrono"],' \
+            '    package_dir={"pychrono": "pychrono"},' \
+            '    include_package_data=True,' \
+            '    distclass=BinDist,' \
+            ')' \
+            > pkg/setup.py
 
           python -m pip install --upgrade build wheel
           python -m build -w pkg
+
 
       - name: Repair wheel (Linux manylinux)
         if: ${{ matrix.triplet == 'linux' }}
