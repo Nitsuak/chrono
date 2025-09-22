@@ -51,7 +51,7 @@ jobs:
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
           # Download and extract Eigen3
           curl -L -o eigen.zip https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip
-          unzip eigen.zip -d $PWD
+          tar -xf eigen.zip
           echo "EIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0" >> $GITHUB_ENV
           echo "Eigen3_ROOT=$PWD/eigen-3.4.0" >> $GITHUB_ENV
 
@@ -103,8 +103,7 @@ jobs:
             -DCH_ENABLE_POSTPROCESS=OFF \
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS \
-            -DPYTHON_INSTALL_DIR="$PWD/build"
+            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS
 
       - name: Show CMake Python vars (diagnostics)
         shell: bash
@@ -121,36 +120,41 @@ jobs:
           echo "---- sample of staged files ----"
           find "$PWD/stage" -maxdepth 6 -type f | head -n 200 || true
 
-      # ---------- Locate staged site-packages (robust) ----------
-      - name: Locate staged site-packages
-        id: sp
+      # ---------- Determine pychrono install dir ----------
+      - name: Determine pychrono install dir
+        id: inst
         shell: bash
         run: |
           set -euo pipefail
-          PKG_PATH=$(find "$PWD/stage" -type d -path "*/site-packages/pychrono" -print -quit || true)
-          if [ -z "$PKG_PATH" ]; then
-            PKG_PATH=$(find "$PWD/stage" -type d -path "*/dist-packages/pychrono" -print -quit || true)
-          fi
-          if [ -z "$PKG_PATH" ]; then
-            PKG_PATH=$(find "$PWD/stage" -type d -name "pychrono" -print -quit || true)
-          fi
-          if [ -z "$PKG_PATH" ]; then
-            PKG_PATH=$(find "$PWD/build" -type d -name "pychrono" -print -quit || true)
-          fi
-
-          if [ -z "$PKG_PATH" ] || [ ! -f "$PKG_PATH/__init__.py" ]; then
-            echo "ERROR: Could not locate installed pychrono package." >&2
-            echo "-- staged tree --"
-            find "$PWD/stage" -maxdepth 6 -print | head -n 300 || true
-            echo "-- build tree (hint) --"
-            find "$PWD/build" -maxdepth 6 -print | head -n 300 || true
-            exit 1
+          # Read CH_INSTALL_PYTHON from CMake cache (Chrono sets this)
+          CH_INSTALL="$(grep -E '^CH_INSTALL_PYTHON:' build/CMakeCache.txt | sed -E 's/.*=(.*)/\1/' || true)"
+          if [ -z "${CH_INSTALL:-}" ]; then
+            # Chrono defaults: Windows=bin, Unix=share/chrono/python
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              CH_INSTALL="bin"
+            else
+              CH_INSTALL="share/chrono/python"
+            fi
           fi
 
-          SITEPKG="$(dirname "$PKG_PATH")"
-          echo "Detected pychrono at: $PKG_PATH"
-          echo "SITEPACKAGES resolved to: $SITEPKG"
-          echo "path=$SITEPKG" >> "$GITHUB_OUTPUT"
+          DEST="$PWD/stage/$CH_INSTALL/pychrono"
+          if [ ! -d "$DEST" ]; then
+            echo "Not at expected path: $DEST"
+            echo "Searching under stage/ for any 'pychrono' dir..."
+            CAND="$(find "$PWD/stage" -type d -name pychrono -print -quit || true)"
+            if [ -z "$CAND" ]; then
+              echo "ERROR: pychrono not found under stage/"
+              echo "-- staged tree (first 300 paths) --"
+              find "$PWD/stage" -maxdepth 6 -print | head -n 300 || true
+              echo "-- build tree hint (first 300 paths) --"
+              find "$PWD/build" -maxdepth 6 -print | head -n 300 || true
+              exit 1
+            fi
+            DEST="$CAND"
+          fi
+
+          echo "PYCHRONO_DIR: $DEST"
+          echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
 
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
@@ -159,8 +163,10 @@ jobs:
           set -euo pipefail
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
-          mkdir -p pkg/pychrono
-          cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
+          # Copy from resolved Chrono install dir (NOT site-packages)
+          cp -R "${{ steps.inst.outputs.pychrono_dir }}/." pkg/pychrono/
+
+          # Write pyproject.toml without heredocs
           printf '%s\n' \
             '[build-system]' \
             'requires = ["setuptools>=68", "wheel"]' \
@@ -172,6 +178,8 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
+
+          # Write setup.py without heredocs
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
