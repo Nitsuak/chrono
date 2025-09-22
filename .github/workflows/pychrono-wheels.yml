@@ -51,7 +51,7 @@ jobs:
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
           # Download and extract Eigen3
           curl -L -o eigen.zip https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip
-          tar -xf eigen.zip
+          unzip eigen.zip
           echo "EIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0" >> $GITHUB_ENV
           echo "Eigen3_ROOT=$PWD/eigen-3.4.0" >> $GITHUB_ENV
 
