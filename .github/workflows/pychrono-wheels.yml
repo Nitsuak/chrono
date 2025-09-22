@@ -10,8 +10,8 @@ permissions:
   contents: write
 
 env:
-  PY_VER: "3.11"      # Blender 4.2/4.3
-  CHRONO_REF: "main"  # or a release tag like "9.0.1"
+  PY_VER: "3.11"
+  CHRONO_REF: "main"
 
 jobs:
   build:
@@ -49,6 +49,11 @@ jobs:
           choco install swig --version=4.1.1 -y
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
+          # Download and extract Eigen3
+          curl -L -o eigen.zip https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip
+          unzip eigen.zip -d $PWD
+          echo "EIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0" >> $GITHUB_ENV
+          echo "Eigen3_ROOT=$PWD/eigen-3.4.0" >> $GITHUB_ENV
 
       - name: Install deps (Linux)
         if: ${{ matrix.triplet == 'linux' }}
@@ -82,6 +87,12 @@ jobs:
         shell: bash
         run: |
           PYEXE=$(python -c "import sys; print(sys.executable)")
+          # Windows: explicitly set Eigen3 path from env
+          if [[ "${{ matrix.triplet }}" == "win" ]]; then
+            EIGEN_FLAGS="-DEIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0 -DEigen3_ROOT=$PWD/eigen-3.4.0"
+          else
+            EIGEN_FLAGS=""
+          fi
           cmake -S . -B build -G "Ninja" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCH_ENABLE_MODULE_PYTHON=ON \
@@ -92,7 +103,8 @@ jobs:
             -DCH_ENABLE_POSTPROCESS=OFF \
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-            -DPython3_EXECUTABLE="$PYEXE"
+            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS \
+            -DPYTHON_INSTALL_DIR="$PWD/build"
 
       - name: Show CMake Python vars (diagnostics)
         shell: bash
@@ -115,17 +127,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 1) Preferred: look for .../site-packages/pychrono
           PKG_PATH=$(find "$PWD/stage" -type d -path "*/site-packages/pychrono" -print -quit || true)
-          # 2) Debian-style: .../dist-packages/pychrono
           if [ -z "$PKG_PATH" ]; then
             PKG_PATH=$(find "$PWD/stage" -type d -path "*/dist-packages/pychrono" -print -quit || true)
           fi
-          # 3) Fallback: any 'pychrono' under stage
           if [ -z "$PKG_PATH" ]; then
             PKG_PATH=$(find "$PWD/stage" -type d -name "pychrono" -print -quit || true)
           fi
-          # 4) Absolute last resort: check build tree
           if [ -z "$PKG_PATH" ]; then
             PKG_PATH=$(find "$PWD/build" -type d -name "pychrono" -print -quit || true)
           fi
@@ -151,12 +159,8 @@ jobs:
           set -euo pipefail
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
-
-          # Copy staged pychrono into packaging src
           mkdir -p pkg/pychrono
           cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
-
-          # Write pyproject.toml (no heredocs)
           printf '%s\n' \
             '[build-system]' \
             'requires = ["setuptools>=68", "wheel"]' \
@@ -168,8 +172,6 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
-
-          # Write setup.py (no heredocs)
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
