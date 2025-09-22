@@ -109,16 +109,30 @@ jobs:
         id: sp
         shell: bash
         run: |
-          set -euo pipefail
-          PKG_PATH=$(find "$PWD/stage" -type d -path "*/site-packages/pychrono" -print -quit || true)
-          if [ -z "$PKG_PATH" ]; then
+          mkdir -p .ci
+          # write a tiny helper (no heredocs)
+          printf '%s\n' \
+            'import os, sysconfig, sys' \
+            'base = os.path.abspath("stage")' \
+            'plat = sysconfig.get_path("platlib", vars={"base": base, "platbase": base})' \
+            'pure = sysconfig.get_path("purelib", vars={"base": base, "platbase": base})' \
+            'cands = [p for p in (plat, pure) if p and os.path.isdir(p)]' \
+            'pkg = ""' \
+            'for p in cands:' \
+            '    if os.path.isdir(os.path.join(p, "pychrono")):' \
+            '        pkg = p; break' \
+            'print(pkg)' \
+            > .ci/find_sitepkg.py
+
+          PKGDIR="$(python .ci/find_sitepkg.py || true)"
+          if [ -z "$PKGDIR" ]; then
             echo "ERROR: staged pychrono not found under site-packages." >&2
-            find "$PWD/stage" -maxdepth 6 -print | head -n 200
+            find "$PWD/stage" -maxdepth 6 -print | head -n 200 || true
             exit 1
           fi
-          SITEPKG="$(dirname "$PKG_PATH")"
-          echo "SITEPACKAGES: $SITEPKG"
-          echo "path=$SITEPKG" >> "$GITHUB_OUTPUT"
+          echo "SITEPACKAGES: $PKGDIR"
+          echo "path=$PKGDIR" >> "$GITHUB_OUTPUT"
+
 
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
