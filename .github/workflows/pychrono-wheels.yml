@@ -102,12 +102,10 @@ jobs:
         shell: bash
         run: |
           cmake -L -N build | sed -n '1,200p' | grep -Ei 'python|py3' || true
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Install to staging prefix
+      - name: Build pychrono Python extension
         shell: bash
         run: |
+          cmake --build build --target pychrono_python --config Release --parallel
           cmake --install build --config Release --prefix "$PWD/stage"
           echo "---- sample of staged files ----"
           find "$PWD/stage" -maxdepth 6 -type f | head -n 200 || true
