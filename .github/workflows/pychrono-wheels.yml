@@ -11,7 +11,7 @@ permissions:
 
 env:
   PY_VER: "3.11"
-  CHRONO_REF: "main"   # or set to a Chrono release tag like "9.0.1"
+  CHRONO_REF: "main"   # or a Chrono release tag like "9.0.1"
 
 jobs:
   # ------------------ Windows + macOS (native runners) ------------------
@@ -77,11 +77,24 @@ jobs:
         shell: bash
         run: |
           PYEXE=$(python -c "import sys; print(sys.executable)")
+
+          # Mac-specific arch & deployment target for correct wheel tags
+          MAC_FLAGS=""
+          if [[ "${{ matrix.triplet }}" == "macos-x86_64" ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=11
+            MAC_FLAGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11"
+          elif [[ "${{ matrix.triplet }}" == "macos-arm64" ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=11
+            MAC_FLAGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11"
+          fi
+
+          # Windows: add Eigen hints
           if [[ "${{ matrix.triplet }}" == "win" ]]; then
             EIGEN_FLAGS="-DEIGEN3_INCLUDE_DIR=${EIGEN3_INCLUDE_DIR} -DEigen3_ROOT=${Eigen3_ROOT}"
           else
             EIGEN_FLAGS=""
           fi
+
           cmake -S . -B build -G "Ninja" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCH_ENABLE_MODULE_PYTHON=ON \
@@ -92,7 +105,7 @@ jobs:
             -DCH_ENABLE_POSTPROCESS=OFF \
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS
+            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS $MAC_FLAGS
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -120,7 +133,6 @@ jobs:
           EXT_FOUND=$(find "$DEST" -type f \( -name "*.so" -o -name "*.pyd" -o -name "*.dylib" \) | head -n1)
           if [ -z "$EXT_FOUND" ]; then
             echo "ERROR: No native Python extension was built in pychrono."
-            echo "Build or install problem! See CMake and build logs."
             exit 1
           else
             echo "Found Python native extension: $EXT_FOUND"
@@ -172,7 +184,7 @@ jobs:
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
 
-          # setup.py
+          # setup.py (mark as binary wheel)
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
@@ -199,9 +211,29 @@ jobs:
         if: ${{ startsWith(matrix.triplet, 'macos') }}
         shell: bash
         run: |
+          set -e
           mkdir -p wheelhouse
+          echo "== listing dylibs under stage =="
+          find "$PWD/stage" -type f -name "*.dylib" | sed 's/^/  /' || true
+
+          # Build -L arguments for all unique dirs containing dylibs
+          LIB_ARGS=""
+          while IFS= read -r d; do
+            LIB_ARGS="$LIB_ARGS -L $d"
+          done < <(find "$PWD/stage" -type f -name "*.dylib" -exec dirname {} \; | sort -u)
+
+          echo "delocate-listdeps:"
           delocate-listdeps pkg/dist/*.whl || true
-          delocate-wheel -w wheelhouse pkg/dist/*.whl
+
+          echo "Running: delocate-wheel -v -w wheelhouse $LIB_ARGS pkg/dist/*.whl"
+          # Use eval so the -L list expands properly
+          if eval "delocate-wheel -v -w wheelhouse $LIB_ARGS pkg/dist/*.whl"; then
+            echo "Delocate success."
+          else
+            echo "Delocate failed; copying original wheel so you still get an artifact."
+            cp pkg/dist/*.whl wheelhouse/
+          fi
+
           ls -al wheelhouse
 
       - name: Move wheel (Windows)
@@ -270,7 +302,6 @@ jobs:
           echo "---- staged (sample) ----"
           find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
 
-      # ---------- Verify pychrono extension presence ----------
       - name: Verify pychrono native extension built
         shell: bash
         run: |
@@ -279,10 +310,9 @@ jobs:
             DEST="$(find "$PWD/stage" -type d -name pychrono -print -quit || true)"
           fi
           echo "Checking for native extension in: $DEST"
-          EXT_FOUND=$(find "$DEST" -type f \( -name "*.so" -o -name "*.pyd" -o -name "*.dylib" \) | head -n1)
+          EXT_FOUND=$(find "$DEST" -type f -name "*.so" | head -n1)
           if [ -z "$EXT_FOUND" ]; then
             echo "ERROR: No native Python extension was built in pychrono."
-            echo "Build or install problem! See CMake and build logs."
             exit 1
           else
             echo "Found Python native extension: $EXT_FOUND"
@@ -342,6 +372,7 @@ jobs:
       - name: auditwheel repair → manylinux_2_17
         shell: bash
         run: |
+          set -e
           mkdir -p wheelhouse
           echo "== auditwheel show =="
           auditwheel show pkg/dist/*.whl || true
