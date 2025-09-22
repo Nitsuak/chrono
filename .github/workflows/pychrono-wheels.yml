@@ -7,11 +7,10 @@ on:
       - "pychrono-*"
 
 permissions:
-  contents: write  # needed for release upload
+  contents: write
 
 env:
   PY_VER: "3.11"
-  # Choose a Chrono ref: a release tag (recommended) or 'main'
   CHRONO_REF: "main"
 
 jobs:
@@ -24,9 +23,9 @@ jobs:
           - os: ubuntu-22.04
             triplet: linux
           - os: macos-13
-            triplet: macos-x86_64      # Intel
+            triplet: macos-x86_64
           - os: macos-14
-            triplet: macos-arm64       # Apple Silicon
+            triplet: macos-arm64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -67,7 +66,7 @@ jobs:
           brew install cmake eigen ninja
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
-          # Build SWIG 4.1.1 from source (Chrono Python bindings are picky about versions)
+          # Build SWIG 4.1.1 from source
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
           pushd swig-4.1.1
@@ -88,7 +87,7 @@ jobs:
             -DCH_ENABLE_VEHICLE=OFF \
             -DCH_ENABLE_IRRLICHT=OFF \
             -DCH_ENABLE_VSG=OFF \
-            -DCH_ENABLE_SENSORATION=OFF \
+            -DCH_ENABLE_SENSOR=OFF \
             -DCH_ENABLE_POSTPROCESS=OFF \
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
@@ -109,53 +108,42 @@ jobs:
         id: sp
         shell: bash
         run: |
-          python - << 'PY'
-import sys, sysconfig, json, pathlib, os
+          python - <<'PY'
+import os, sysconfig, sys
 base = os.path.abspath("stage")
 platlib = sysconfig.get_path("platlib", vars={"base": base, "platbase": base})
 purelib = sysconfig.get_path("purelib", vars={"base": base, "platbase": base})
-cand = [platlib, purelib]
-cand = [p for p in cand if p and os.path.isdir(p)]
-print("CANDIDATES:", cand)
-pkg = None
-for p in cand:
-    test = os.path.join(p, "pychrono")
-    if os.path.isdir(test):
-        pkg = p; break
-if not pkg:
+candidates = [p for p in [platlib, purelib] if p and os.path.isdir(p)]
+pkgdir = None
+for p in candidates:
+    if os.path.isdir(os.path.join(p, "pychrono")):
+        pkgdir = p
+        break
+if not pkgdir:
     raise SystemExit("ERROR: staged pychrono not found under site-packages.")
-print("SITEPACKAGES:", pkg)
-open(os.environ["GITHUB_OUTPUT"], "a").write(f"path={pkg}\n")
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+    f.write(f"path={pkgdir}\n")
+print("SITEPACKAGES:", pkgdir)
 PY
 
       # ---------- Package as a wheel ----------
-      - name: Package wheel (generic)
-        shell: bash
-        run: |
-          PKGDIR=$(python - << 'PY'
-import os; import json; print(os.environ.get("PKGDIR",""))
-PY)
-        env:
-          PKGDIR: ${{ steps.sp.outputs.path }}
-
       - name: Create packaging skeleton
         shell: bash
         run: |
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
           # Copy staged pychrono into package source
-          rsync -a "${{ steps.sp.outputs.path }}/pychrono/" "pkg/pychrono/" || true
+          rsync -a "${{ steps.sp.outputs.path }}/pychrono/" "pkg/pychrono/" 2>/dev/null || true
           if [ ! -d "pkg/pychrono" ]; then
-            # Windows fallback if rsync absent
-            python - << 'PY'
-import shutil, os
-src = r"${{ steps.sp.outputs.path }}\\pychrono"
-dst = r"pkg\\pychrono"
+            python - <<'PY'
+import os, shutil
+src = os.path.join(r"${{ steps.sp.outputs.path }}", "pychrono")
+dst = os.path.join("pkg", "pychrono")
 shutil.copytree(src, dst, dirs_exist_ok=True)
 PY
           fi
           # Minimal packaging files
-          cat > pkg/pyproject.toml << 'TOML'
+          cat > pkg/pyproject.toml <<'TOML'
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -166,12 +154,12 @@ version = "0.0.0+local"
 description = "PyChrono binary wheel (built from Project Chrono)"
 requires-python = ">=3.11,<3.12"
 TOML
-          cat > pkg/setup.py << 'PY'
+          cat > pkg/setup.py <<'PY'
 from setuptools import setup
 from setuptools.dist import Distribution
 class BinDist(Distribution):
-    def has_ext_modules(self):  # mark wheel as binary so it gets platform tag
-        return True
+    def has_ext_modules(self):
+        return True  # mark as binary -> platform-tagged wheel
 setup(
     name="pychrono",
     version="0.0.0+local",
@@ -249,4 +237,3 @@ PY
         with:
           files: wheelhouse/*.whl
           generate_release_notes: true
-CI: build PyChrono wheels for cp311 on Win/Linux/macOS
