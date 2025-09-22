@@ -104,6 +104,28 @@ jobs:
           echo "---- staged files (sample) ----"
           find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
 
+      # ---------- Verify pychrono extension presence ----------
+      - name: Verify pychrono native extension built
+        shell: bash
+        run: |
+          CH_INSTALL="$(grep -E '^CH_INSTALL_PYTHON:' build/CMakeCache.txt | sed -E 's/.*=(.*)/\1/' || true)"
+          if [ -z "${CH_INSTALL:-}" ]; then
+            if [ "$RUNNER_OS" = "Windows" ]; then CH_INSTALL="bin"; else CH_INSTALL="share/chrono/python"; fi
+          fi
+          DEST="$PWD/stage/$CH_INSTALL/pychrono"
+          if [ ! -d "$DEST" ]; then
+            DEST="$(find "$PWD/stage" -type d -name pychrono -print -quit || true)"
+          fi
+          echo "Checking for native extension in: $DEST"
+          EXT_FOUND=$(find "$DEST" -type f \( -name "*.so" -o -name "*.pyd" -o -name "*.dylib" \) | head -n1)
+          if [ -z "$EXT_FOUND" ]; then
+            echo "ERROR: No native Python extension was built in pychrono."
+            echo "Build or install problem! See CMake and build logs."
+            exit 1
+          else
+            echo "Found Python native extension: $EXT_FOUND"
+          fi
+
       # ---------- Resolve pychrono install dir (Chrono uses CH_INSTALL_PYTHON) ----------
       - name: Determine pychrono install dir
         id: inst
@@ -247,6 +269,24 @@ jobs:
           cmake --install build --config Release --prefix "$PWD/stage"
           echo "---- staged (sample) ----"
           find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
+
+      # ---------- Verify pychrono extension presence ----------
+      - name: Verify pychrono native extension built
+        shell: bash
+        run: |
+          DEST="$PWD/stage/share/chrono/python/pychrono"
+          if [ ! -d "$DEST" ]; then
+            DEST="$(find "$PWD/stage" -type d -name pychrono -print -quit || true)"
+          fi
+          echo "Checking for native extension in: $DEST"
+          EXT_FOUND=$(find "$DEST" -type f \( -name "*.so" -o -name "*.pyd" -o -name "*.dylib" \) | head -n1)
+          if [ -z "$EXT_FOUND" ]; then
+            echo "ERROR: No native Python extension was built in pychrono."
+            echo "Build or install problem! See CMake and build logs."
+            exit 1
+          else
+            echo "Found Python native extension: $EXT_FOUND"
+          fi
 
       - name: Package wheel (from Chrono install dir)
         shell: bash
