@@ -7,11 +7,11 @@ on:
       - "pychrono-*"
 
 permissions:
-  contents: write
+  contents: write  # needed for release upload
 
 env:
-  PY_VER: "3.11"
-  CHRONO_REF: "main"
+  PY_VER: "3.11"         # Blender 4.2/4.3 era
+  CHRONO_REF: "main"     # or use a release tag like "9.0.1"
 
 jobs:
   build:
@@ -23,9 +23,9 @@ jobs:
           - os: ubuntu-22.04
             triplet: linux
           - os: macos-13
-            triplet: macos-x86_64
+            triplet: macos-x86_64   # Intel
           - os: macos-14
-            triplet: macos-arm64
+            triplet: macos-arm64    # Apple Silicon
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -52,6 +52,7 @@ jobs:
 
       - name: Install deps (Linux)
         if: ${{ matrix.triplet == 'linux' }}
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y swig libeigen3-dev ninja-build patchelf
@@ -66,7 +67,7 @@ jobs:
           brew install cmake eigen ninja
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
-          # Build SWIG 4.1.1 from source
+          # Build SWIG 4.1.1 from source (avoid 4.3 issues)
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
           pushd swig-4.1.1
@@ -100,48 +101,42 @@ jobs:
         shell: bash
         run: |
           cmake --install build --config Release --prefix "$PWD/stage"
-          echo "Staged files:"
-          find stage -maxdepth 4 -type f | head -n 50
+          echo "Staged files (sample):"
+          find "$PWD/stage" -maxdepth 4 -type f | head -n 50
 
       # ---------- Locate staged site-packages ----------
       - name: Locate staged site-packages
         id: sp
         shell: bash
         run: |
-          python - <<'PY'
-import os, sysconfig, sys
-base = os.path.abspath("stage")
-platlib = sysconfig.get_path("platlib", vars={"base": base, "platbase": base})
-purelib = sysconfig.get_path("purelib", vars={"base": base, "platbase": base})
-candidates = [p for p in [platlib, purelib] if p and os.path.isdir(p)]
-pkgdir = None
-for p in candidates:
-    if os.path.isdir(os.path.join(p, "pychrono")):
-        pkgdir = p
-        break
-if not pkgdir:
-    raise SystemExit("ERROR: staged pychrono not found under site-packages.")
-with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-    f.write(f"path={pkgdir}\n")
-print("SITEPACKAGES:", pkgdir)
-PY
+          set -euo pipefail
+          # Find .../site-packages/pychrono and use its parent as site-packages
+          PKG_PATH=$(find "$PWD/stage" -type d -path "*/site-packages/pychrono" -print -quit || true)
+          if [ -z "$PKG_PATH" ]; then
+            echo "ERROR: staged pychrono not found under site-packages." >&2
+            echo "Contents of stage (first 100 entries):"
+            find "$PWD/stage" -maxdepth 5 -print | head -n 100
+            exit 1
+          fi
+          SITEPKG="$(dirname "$PKG_PATH")"
+          echo "SITEPACKAGES: $SITEPKG"
+          echo "path=$SITEPKG" >> "$GITHUB_OUTPUT"
 
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
         shell: bash
         run: |
+          set -euo pipefail
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
-          # Copy staged pychrono into package source
+
+          # Copy staged pychrono into packaging src
           rsync -a "${{ steps.sp.outputs.path }}/pychrono/" "pkg/pychrono/" 2>/dev/null || true
-          if [ ! -d "pkg/pychrono" ]; then
-            python - <<'PY'
-import os, shutil
-src = os.path.join(r"${{ steps.sp.outputs.path }}", "pychrono")
-dst = os.path.join("pkg", "pychrono")
-shutil.copytree(src, dst, dirs_exist_ok=True)
-PY
+          if [ ! -d "pkg/pychrono" ] || [ -z "$(ls -A pkg/pychrono 2>/dev/null)" ]; then
+            mkdir -p pkg/pychrono
+            cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
           fi
+
           # Minimal packaging files
           cat > pkg/pyproject.toml <<'TOML'
 [build-system]
@@ -154,6 +149,7 @@ version = "0.0.0+local"
 description = "PyChrono binary wheel (built from Project Chrono)"
 requires-python = ">=3.11,<3.12"
 TOML
+
           cat > pkg/setup.py <<'PY'
 from setuptools import setup
 from setuptools.dist import Distribution
@@ -169,6 +165,8 @@ setup(
     distclass=BinDist,
 )
 PY
+
+          python -m pip install --upgrade build wheel
           python -m build -w pkg
 
       - name: Repair wheel (Linux manylinux)
@@ -191,9 +189,10 @@ PY
 
       - name: Move wheel (Windows)
         if: ${{ matrix.triplet == 'win' }}
+        shell: bash
         run: |
-          if not exist wheelhouse mkdir wheelhouse
-          for %%F in (pkg\dist\*.whl) do move "%%F" wheelhouse\
+          mkdir -p wheelhouse
+          cp pkg/dist/*.whl wheelhouse/
 
       - name: Upload per-OS wheel artifact
         uses: actions/upload-artifact@v4
