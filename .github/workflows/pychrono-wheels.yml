@@ -53,7 +53,6 @@ jobs:
           unzip eigen.zip
           echo "EIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0" >> $GITHUB_ENV
           echo "Eigen3_ROOT=$PWD/eigen-3.4.0" >> $GITHUB_ENV
-
       - name: Install deps (Linux)
         if: ${{ matrix.triplet == 'linux' }}
         shell: bash
@@ -62,7 +61,6 @@ jobs:
           sudo apt-get install -y swig libeigen3-dev ninja-build patchelf
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy auditwheel
-
       - name: Install deps (macOS)
         if: ${{ startsWith(matrix.triplet, 'macos') }}
         shell: bash
@@ -79,7 +77,6 @@ jobs:
           sudo make install
           cd ..
           swig -version
-
       # ---------- Configure / Build ----------
       - name: Configure (CMake, Python module only)
         shell: bash
@@ -101,12 +98,10 @@ jobs:
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
             -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS
-
       - name: Show CMake Python vars (diagnostics)
         shell: bash
         run: |
           cmake -L -N build | sed -n '1,200p' | grep -Ei 'python|py3' || true
-
       - name: Build
         run: cmake --build build --config Release --parallel
 
@@ -116,7 +111,6 @@ jobs:
           cmake --install build --config Release --prefix "$PWD/stage"
           echo "---- sample of staged files ----"
           find "$PWD/stage" -maxdepth 6 -type f | head -n 200 || true
-
       # ---------- Determine pychrono install dir ----------
       - name: Determine pychrono install dir
         id: inst
@@ -148,7 +142,6 @@ jobs:
           fi
           echo "PYCHRONO_DIR: $DEST"
           echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
-
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
         shell: bash
@@ -158,6 +151,9 @@ jobs:
           mkdir -p pkg/pychrono wheelhouse
           # Copy from resolved Chrono install dir (NOT site-packages)
           cp -R "${{ steps.inst.outputs.pychrono_dir }}/." pkg/pychrono/
+          # Show which extensions will be packaged
+          echo "Native extensions in pychrono:"
+          find pkg/pychrono -name "*.so" -o -name "*.pyd" -o -name "*.dylib" || true
           printf '%s\n' \
             '[build-system]' \
             'requires = ["setuptools>=68", "wheel"]' \
@@ -188,7 +184,6 @@ jobs:
             > pkg/setup.py
           python -m pip install --upgrade build wheel
           python -m build -w pkg
-
       - name: Repair wheel (Linux manylinux)
         if: ${{ matrix.triplet == 'linux' }}
         shell: bash
@@ -197,13 +192,11 @@ jobs:
           auditwheel show pkg/dist/*.whl || true
           auditwheel repair pkg/dist/*.whl -w wheelhouse
           ls -al wheelhouse
-
       - name: Repair wheel (macOS delocate)
         if: ${{ startsWith(matrix.triplet, 'macos') }}
         shell: bash
         run: |
           ls -al pkg/dist
-          # Only run delocate if .so/.dylib exists and it's universal2
           DYLIB=$(find pkg/dist -name "*.dylib" -o -name "*.so" | head -n1)
           if [ -n "$DYLIB" ]; then
             ARCHS=$(lipo -archs "$DYLIB" || echo "")
@@ -219,14 +212,12 @@ jobs:
             cp pkg/dist/*.whl wheelhouse/
           fi
           ls -al wheelhouse
-
       - name: Move wheel (Windows)
         if: ${{ matrix.triplet == 'win' }}
         shell: bash
         run: |
           mkdir -p wheelhouse
           cp pkg/dist/*.whl wheelhouse/
-
       - name: Upload per-OS wheel artifact
         uses: actions/upload-artifact@v4
         with:
