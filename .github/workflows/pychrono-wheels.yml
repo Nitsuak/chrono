@@ -102,13 +102,16 @@ jobs:
         shell: bash
         run: |
           cmake -L -N build | sed -n '1,200p' | grep -Ei 'python|py3' || true
-      - name: Build pychrono Python extension
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Install to staging prefix
         shell: bash
         run: |
-          cmake --build build --target pychrono_python --config Release --parallel
           cmake --install build --config Release --prefix "$PWD/stage"
           echo "---- sample of staged files ----"
           find "$PWD/stage" -maxdepth 6 -type f | head -n 200 || true
+
       # ---------- Determine pychrono install dir ----------
       - name: Determine pychrono install dir
         id: inst
@@ -140,6 +143,19 @@ jobs:
           fi
           echo "PYCHRONO_DIR: $DEST"
           echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
+
+      # ---------- Verify native extension is present ----------
+      - name: Verify pychrono native extension exists
+        shell: bash
+        run: |
+          EXT_FOUND=$(find "${{ steps.inst.outputs.pychrono_dir }}" -name "*.so" -o -name "*.pyd" -o -name "*.dylib" | head -n1)
+          if [ -z "$EXT_FOUND" ]; then
+            echo "ERROR: No native Python extension was built in pychrono."
+            echo "Build or install problem! See CMake and build logs."
+            exit 1
+          fi
+          echo "Native extension found: $EXT_FOUND"
+
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
         shell: bash
@@ -147,9 +163,7 @@ jobs:
           set -euo pipefail
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
-          # Copy from resolved Chrono install dir (NOT site-packages)
           cp -R "${{ steps.inst.outputs.pychrono_dir }}/." pkg/pychrono/
-          # Show which extensions will be packaged
           echo "Native extensions in pychrono:"
           find pkg/pychrono -name "*.so" -o -name "*.pyd" -o -name "*.dylib" || true
           printf '%s\n' \
