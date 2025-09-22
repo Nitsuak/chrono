@@ -1,0 +1,252 @@
+name: build-pychrono-wheels-cp311
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "pychrono-*"
+
+permissions:
+  contents: write  # needed for release upload
+
+env:
+  PY_VER: "3.11"
+  # Choose a Chrono ref: a release tag (recommended) or 'main'
+  CHRONO_REF: "main"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-2022
+            triplet: win
+          - os: ubuntu-22.04
+            triplet: linux
+          - os: macos-13
+            triplet: macos-x86_64      # Intel
+          - os: macos-14
+            triplet: macos-arm64       # Apple Silicon
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Chrono
+        uses: actions/checkout@v4
+        with:
+          repository: projectchrono/chrono
+          ref: ${{ env.CHRONO_REF }}
+
+      - name: Set up Python ${{ env.PY_VER }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VER }}
+
+      # ---------- OS-specific deps ----------
+      - name: Install deps (Windows)
+        if: ${{ matrix.triplet == 'win' }}
+        shell: bash
+        run: |
+          choco install cmake --installargs '"ADD_CMAKE_TO_PATH=System"' -y
+          choco install swig --version=4.1.1 -y
+          python -m pip install --upgrade pip
+          python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
+
+      - name: Install deps (Linux)
+        if: ${{ matrix.triplet == 'linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y swig libeigen3-dev ninja-build patchelf
+          python -m pip install --upgrade pip
+          python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy auditwheel
+
+      - name: Install deps (macOS)
+        if: ${{ startsWith(matrix.triplet, 'macos') }}
+        shell: bash
+        run: |
+          brew update
+          brew install cmake eigen ninja
+          python -m pip install --upgrade pip
+          python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
+          # Build SWIG 4.1.1 from source (Chrono Python bindings are picky about versions)
+          curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
+          tar xzf swig-4.1.1.tar.gz
+          pushd swig-4.1.1
+          ./configure
+          make -j2
+          sudo make install
+          popd
+          swig -version
+
+      # ---------- Configure / Build ----------
+      - name: Configure (CMake, Python module only)
+        shell: bash
+        run: |
+          PYEXE=$(python -c "import sys; print(sys.executable)")
+          cmake -S . -B build -G "Ninja" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCH_ENABLE_MODULE_PYTHON=ON \
+            -DCH_ENABLE_VEHICLE=OFF \
+            -DCH_ENABLE_IRRLICHT=OFF \
+            -DCH_ENABLE_VSG=OFF \
+            -DCH_ENABLE_SENSORATION=OFF \
+            -DCH_ENABLE_POSTPROCESS=OFF \
+            -DCH_ENABLE_OPENGL=OFF \
+            -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
+            -DPython3_EXECUTABLE="$PYEXE"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Install to staging prefix
+        shell: bash
+        run: |
+          cmake --install build --config Release --prefix "$PWD/stage"
+          echo "Staged files:"
+          find stage -maxdepth 4 -type f | head -n 50
+
+      # ---------- Locate staged site-packages ----------
+      - name: Locate staged site-packages
+        id: sp
+        shell: bash
+        run: |
+          python - << 'PY'
+import sys, sysconfig, json, pathlib, os
+base = os.path.abspath("stage")
+platlib = sysconfig.get_path("platlib", vars={"base": base, "platbase": base})
+purelib = sysconfig.get_path("purelib", vars={"base": base, "platbase": base})
+cand = [platlib, purelib]
+cand = [p for p in cand if p and os.path.isdir(p)]
+print("CANDIDATES:", cand)
+pkg = None
+for p in cand:
+    test = os.path.join(p, "pychrono")
+    if os.path.isdir(test):
+        pkg = p; break
+if not pkg:
+    raise SystemExit("ERROR: staged pychrono not found under site-packages.")
+print("SITEPACKAGES:", pkg)
+open(os.environ["GITHUB_OUTPUT"], "a").write(f"path={pkg}\n")
+PY
+
+      # ---------- Package as a wheel ----------
+      - name: Package wheel (generic)
+        shell: bash
+        run: |
+          PKGDIR=$(python - << 'PY'
+import os; import json; print(os.environ.get("PKGDIR",""))
+PY)
+        env:
+          PKGDIR: ${{ steps.sp.outputs.path }}
+
+      - name: Create packaging skeleton
+        shell: bash
+        run: |
+          rm -rf pkg wheelhouse
+          mkdir -p pkg/pychrono wheelhouse
+          # Copy staged pychrono into package source
+          rsync -a "${{ steps.sp.outputs.path }}/pychrono/" "pkg/pychrono/" || true
+          if [ ! -d "pkg/pychrono" ]; then
+            # Windows fallback if rsync absent
+            python - << 'PY'
+import shutil, os
+src = r"${{ steps.sp.outputs.path }}\\pychrono"
+dst = r"pkg\\pychrono"
+shutil.copytree(src, dst, dirs_exist_ok=True)
+PY
+          fi
+          # Minimal packaging files
+          cat > pkg/pyproject.toml << 'TOML'
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pychrono"
+version = "0.0.0+local"
+description = "PyChrono binary wheel (built from Project Chrono)"
+requires-python = ">=3.11,<3.12"
+TOML
+          cat > pkg/setup.py << 'PY'
+from setuptools import setup
+from setuptools.dist import Distribution
+class BinDist(Distribution):
+    def has_ext_modules(self):  # mark wheel as binary so it gets platform tag
+        return True
+setup(
+    name="pychrono",
+    version="0.0.0+local",
+    packages=["pychrono"],
+    package_dir={"pychrono": "pychrono"},
+    include_package_data=True,
+    distclass=BinDist,
+)
+PY
+          python -m build -w pkg
+
+      - name: Repair wheel (Linux manylinux)
+        if: ${{ matrix.triplet == 'linux' }}
+        shell: bash
+        run: |
+          ls -al pkg/dist
+          auditwheel show pkg/dist/*.whl || true
+          auditwheel repair pkg/dist/*.whl -w wheelhouse
+          ls -al wheelhouse
+
+      - name: Repair wheel (macOS delocate)
+        if: ${{ startsWith(matrix.triplet, 'macos') }}
+        shell: bash
+        run: |
+          ls -al pkg/dist
+          delocate-listdeps pkg/dist/*.whl || true
+          delocate-wheel -w wheelhouse pkg/dist/*.whl
+          ls -al wheelhouse
+
+      - name: Move wheel (Windows)
+        if: ${{ matrix.triplet == 'win' }}
+        run: |
+          if not exist wheelhouse mkdir wheelhouse
+          for %%F in (pkg\dist\*.whl) do move "%%F" wheelhouse\
+
+      - name: Upload per-OS wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pychrono-wheel-cp311-${{ matrix.triplet }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  collect:
+    name: Collect wheels
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pychrono-wheel-cp311-*
+          merge-multiple: true
+          path: wheelhouse
+      - name: List final wheels
+        run: ls -al wheelhouse
+      - name: Upload combined wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: pychrono-wheels-cp311
+          path: wheelhouse/*.whl
+
+  release:
+    name: Release wheels
+    needs: collect
+    if: startsWith(github.ref, 'refs/tags/pychrono-')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download combined wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: pychrono-wheels-cp311
+          path: wheelhouse
+      - name: Create GitHub Release & upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wheelhouse/*.whl
+          generate_release_notes: true
+CI: build PyChrono wheels for cp311 on Win/Linux/macOS
