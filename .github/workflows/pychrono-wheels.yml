@@ -7,11 +7,11 @@ on:
       - "pychrono-*"
 
 permissions:
-  contents: write  # needed for release upload
+  contents: write  # needed for attaching wheels to Releases
 
 env:
-  PY_VER: "3.11"         # Blender 4.2/4.3 era
-  CHRONO_REF: "main"     # or use a release tag like "9.0.1"
+  PY_VER: "3.11"      # Blender 4.2/4.3 era
+  CHRONO_REF: "main"  # or use a stable tag like "9.0.1"
 
 jobs:
   build:
@@ -23,9 +23,9 @@ jobs:
           - os: ubuntu-22.04
             triplet: linux
           - os: macos-13
-            triplet: macos-x86_64   # Intel
+            triplet: macos-x86_64     # Intel
           - os: macos-14
-            triplet: macos-arm64    # Apple Silicon
+            triplet: macos-arm64      # Apple Silicon
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -67,14 +67,14 @@ jobs:
           brew install cmake eigen ninja
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
-          # Build SWIG 4.1.1 from source (avoid 4.3 issues)
+          # Build SWIG 4.1.1 from source (avoids 4.3 issues with Chrono bindings)
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
-          pushd swig-4.1.1
+          cd swig-4.1.1
           ./configure
           make -j2
           sudo make install
-          popd
+          cd ..
           swig -version
 
       # ---------- Configure / Build ----------
@@ -110,12 +110,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Find .../site-packages/pychrono and use its parent as site-packages
           PKG_PATH=$(find "$PWD/stage" -type d -path "*/site-packages/pychrono" -print -quit || true)
           if [ -z "$PKG_PATH" ]; then
             echo "ERROR: staged pychrono not found under site-packages." >&2
-            echo "Contents of stage (first 100 entries):"
-            find "$PWD/stage" -maxdepth 5 -print | head -n 100
+            find "$PWD/stage" -maxdepth 6 -print | head -n 200
             exit 1
           fi
           SITEPKG="$(dirname "$PKG_PATH")"
@@ -127,15 +125,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf pkg wheelhouse
           mkdir -p pkg/pychrono wheelhouse
-
-          # Copy staged pychrono into packaging src (no rsync, just cp -R)
+          # Copy staged pychrono into packaging src
           mkdir -p pkg/pychrono
           cp -R "${{ steps.sp.outputs.path }}/pychrono/." pkg/pychrono/
 
-          # --- Write pyproject.toml without heredocs ---
+          # Write pyproject.toml without heredocs
           printf '%s\n' \
             '[build-system]' \
             'requires = ["setuptools>=68", "wheel"]' \
@@ -148,7 +144,7 @@ jobs:
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
 
-          # --- Write setup.py without heredocs ---
+          # Write setup.py without heredocs
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
@@ -169,7 +165,6 @@ jobs:
 
           python -m pip install --upgrade build wheel
           python -m build -w pkg
-
 
       - name: Repair wheel (Linux manylinux)
         if: ${{ matrix.triplet == 'linux' }}
