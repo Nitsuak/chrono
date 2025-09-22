@@ -49,7 +49,6 @@ jobs:
           choco install swig --version=4.1.1 -y
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
-          # Download and extract Eigen3
           curl -L -o eigen.zip https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip
           unzip eigen.zip
           echo "EIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0" >> $GITHUB_ENV
@@ -72,7 +71,6 @@ jobs:
           brew install cmake eigen ninja
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
-          # Build SWIG 4.1.1 (avoid 4.3 issues for Chrono bindings)
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
           cd swig-4.1.1
@@ -87,7 +85,6 @@ jobs:
         shell: bash
         run: |
           PYEXE=$(python -c "import sys; print(sys.executable)")
-          # Windows: explicitly set Eigen3 path from env
           if [[ "${{ matrix.triplet }}" == "win" ]]; then
             EIGEN_FLAGS="-DEIGEN3_INCLUDE_DIR=$PWD/eigen-3.4.0 -DEigen3_ROOT=$PWD/eigen-3.4.0"
           else
@@ -126,17 +123,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Read CH_INSTALL_PYTHON from CMake cache (Chrono sets this)
           CH_INSTALL="$(grep -E '^CH_INSTALL_PYTHON:' build/CMakeCache.txt | sed -E 's/.*=(.*)/\1/' || true)"
           if [ -z "${CH_INSTALL:-}" ]; then
-            # Chrono defaults: Windows=bin, Unix=share/chrono/python
             if [ "$RUNNER_OS" = "Windows" ]; then
               CH_INSTALL="bin"
             else
               CH_INSTALL="share/chrono/python"
             fi
           fi
-
           DEST="$PWD/stage/$CH_INSTALL/pychrono"
           if [ ! -d "$DEST" ]; then
             echo "Not at expected path: $DEST"
@@ -152,7 +146,6 @@ jobs:
             fi
             DEST="$CAND"
           fi
-
           echo "PYCHRONO_DIR: $DEST"
           echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
 
@@ -165,8 +158,6 @@ jobs:
           mkdir -p pkg/pychrono wheelhouse
           # Copy from resolved Chrono install dir (NOT site-packages)
           cp -R "${{ steps.inst.outputs.pychrono_dir }}/." pkg/pychrono/
-
-          # Write pyproject.toml without heredocs
           printf '%s\n' \
             '[build-system]' \
             'requires = ["setuptools>=68", "wheel"]' \
@@ -178,15 +169,13 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
-
-          # Write setup.py without heredocs
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
             '' \
             'class BinDist(Distribution):' \
             '    def has_ext_modules(self):' \
-            '        return True  # mark wheel as binary -> platform tag' \
+            '        return True' \
             '' \
             'setup(' \
             '    name="pychrono",' \
@@ -197,7 +186,6 @@ jobs:
             '    distclass=BinDist,' \
             ')' \
             > pkg/setup.py
-
           python -m pip install --upgrade build wheel
           python -m build -w pkg
 
@@ -215,8 +203,21 @@ jobs:
         shell: bash
         run: |
           ls -al pkg/dist
-          delocate-listdeps pkg/dist/*.whl || true
-          delocate-wheel -w wheelhouse pkg/dist/*.whl
+          # Only run delocate if .so/.dylib exists and it's universal2
+          DYLIB=$(find pkg/dist -name "*.dylib" -o -name "*.so" | head -n1)
+          if [ -n "$DYLIB" ]; then
+            ARCHS=$(lipo -archs "$DYLIB" || echo "")
+            if [[ "$ARCHS" == *"x86_64"* && "$ARCHS" == *"arm64"* ]]; then
+              delocate-listdeps pkg/dist/*.whl || true
+              delocate-wheel -w wheelhouse pkg/dist/*.whl
+            else
+              echo "ERROR: extension is not universal2 ($ARCHS)"
+              exit 1
+            fi
+          else
+            echo "No native extensions found, skipping delocate."
+            cp pkg/dist/*.whl wheelhouse/
+          fi
           ls -al wheelhouse
 
       - name: Move wheel (Windows)
