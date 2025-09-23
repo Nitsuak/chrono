@@ -56,7 +56,6 @@ jobs:
           "Eigen3_ROOT=$($eigenDir.FullName)"       | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "EIGEN3_INCLUDE_DIR=$($eigenDir.FullName)"| Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # Ensure MSVC dev environment for steps that compile/link
       - name: MSVC Dev Cmd (x64)
         if: ${{ matrix.triplet == 'win' }}
         uses: ilammy/msvc-dev-cmd@v1
@@ -220,7 +219,7 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
-          # setup.py (mark as binary wheel)
+          # setup.py
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
@@ -248,7 +247,6 @@ jobs:
         run: |
           set -e
           mkdir -p wheelhouse
-          # Build -L arguments for all unique dirs containing dylibs
           LIB_ARGS=""
           while IFS= read -r d; do
             LIB_ARGS="$LIB_ARGS -L $d"
@@ -282,7 +280,7 @@ jobs:
     runs-on: ubuntu-22.04
     container: quay.io/pypa/manylinux2014_x86_64
     steps:
-      - name: Bootstrap tools required by actions/checkout
+      - name: Bootstrap tools required by checkout (inside CentOS7 container)
         shell: bash
         run: |
           yum -y install git tar gzip ca-certificates
@@ -290,7 +288,9 @@ jobs:
           git --version
           tar --version
 
-      - uses: actions/checkout@v4
+      # IMPORTANT: Use v3 (Node 16) in CentOS7 to avoid GLIBC>=2.28 requirement of Node 20
+      - name: Checkout Chrono
+        uses: actions/checkout@v3
         with:
           repository: projectchrono/chrono
           ref: ${{ env.CHRONO_REF }}
@@ -411,7 +411,8 @@ jobs:
           auditwheel repair pkg/dist/*.whl -w wheelhouse
           ls -al wheelhouse
 
-      - uses: actions/upload-artifact@v4
+      # IMPORTANT: Use v3 (Node 16) in CentOS7 to avoid Node20/glibc mismatch
+      - uses: actions/upload-artifact@v3
         with:
           name: pychrono-wheel-cp311-linux
           path: wheelhouse/*.whl
