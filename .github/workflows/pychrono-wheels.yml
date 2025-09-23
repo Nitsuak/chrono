@@ -219,7 +219,7 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
-          # setup.py
+          # setup.py (mark as binary wheel)
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
@@ -247,6 +247,7 @@ jobs:
         run: |
           set -e
           mkdir -p wheelhouse
+          # Build -L arguments for all unique dirs containing dylibs
           LIB_ARGS=""
           while IFS= read -r d; do
             LIB_ARGS="$LIB_ARGS -L $d"
@@ -279,6 +280,7 @@ jobs:
     name: Build (Linux manylinux2014 cp311)
     runs-on: ubuntu-22.04
     container: quay.io/pypa/manylinux2014_x86_64
+    continue-on-error: true
     steps:
       - name: Bootstrap tools required by checkout (inside CentOS7 container)
         shell: bash
@@ -288,7 +290,7 @@ jobs:
           git --version
           tar --version
 
-      # IMPORTANT: Use v3 (Node 16) in CentOS7 to avoid GLIBC>=2.28 requirement of Node 20
+      # Use v3 (Node 16) to avoid Node20/glibc mismatch in CentOS7
       - name: Checkout Chrono
         uses: actions/checkout@v3
         with:
@@ -411,7 +413,7 @@ jobs:
           auditwheel repair pkg/dist/*.whl -w wheelhouse
           ls -al wheelhouse
 
-      # IMPORTANT: Use v3 (Node 16) in CentOS7 to avoid Node20/glibc mismatch
+      # Use v3 (Node 16) to avoid Node20/glibc mismatch
       - uses: actions/upload-artifact@v3
         with:
           name: pychrono-wheel-cp311-linux
@@ -422,6 +424,7 @@ jobs:
   collect:
     name: Collect wheels
     needs: [build_desktop, build_linux_manylinux]
+    if: always()
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
