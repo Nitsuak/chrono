@@ -1,22 +1,33 @@
+# This workflow builds PyChrono binary wheels for Windows, macOS (x86_64/arm64),
+# and Linux (manylinux) for a specific Python version.
 name: build-pychrono-wheels-cp311
 
 on:
+  # Allows manual triggering of the workflow from the Actions tab
   workflow_dispatch:
+  # Triggers the workflow when a tag starting with "pychrono-" is pushed
   push:
     tags:
       - "pychrono-*"
 
+# Permissions required for uploading release assets
 permissions:
-  contents: write  # needed for release upload
+  contents: write
 
 env:
+  # --- Build Configuration ---
   PY_VER: "3.11"
-  CHRONO_REF: "main"   # or a Chrono release tag like "9.0.1"
+  # IMPORTANT: Use a stable release tag from Project Chrono to ensure a reliable build.
+  # Using "main" can lead to build failures due to in-development changes.
+  CHRONO_REF: "9.0.1"
 
 jobs:
-  # ------------------ Windows + macOS (native runners) ------------------
+  # ====================================================================
+  # == Job: Build for Windows and macOS on native runners
+  # ====================================================================
   build_desktop:
     strategy:
+      fail-fast: false # Prevent other jobs from being cancelled if one fails
       matrix:
         include:
           - os: windows-2022
@@ -25,10 +36,11 @@ jobs:
             triplet: macos-x86_64
           - os: macos-14
             triplet: macos-arm64
+
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout Chrono
+      - name: Checkout Chrono source code
         uses: actions/checkout@v4
         with:
           repository: projectchrono/chrono
@@ -39,63 +51,66 @@ jobs:
         with:
           python-version: ${{ env.PY_VER }}
 
-      # ---------- Deps: Windows ----------
-      - name: Install deps (Windows)
-        if: ${{ matrix.triplet == 'win' }}
+      # ------------------ Windows Dependencies ------------------
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          echo "Installing CMake, SWIG, and Python packages..."
           choco install cmake --installargs '"ADD_CMAKE_TO_PATH=System"' -y --no-progress
           choco install swig --version=4.1.1 -y --no-progress
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
-          # Eigen (header-only)
+
+          echo "Downloading and extracting Eigen..."
           $zip = "eigen-3.4.0.zip"
           Invoke-WebRequest -Uri "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip" -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath .
           $eigenDir = Get-ChildItem -Directory | Where-Object { $_.Name -like "eigen-3.4.0*" } | Select-Object -First 1
-          if (-not $eigenDir) { Write-Error "Eigen folder not found"; exit 1 }
-          "Eigen3_ROOT=$($eigenDir.FullName)"       | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "EIGEN3_INCLUDE_DIR=$($eigenDir.FullName)"| Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not $eigenDir) {
+            Write-Error "Eigen folder not found after extraction!"
+            exit 1
+          }
+          echo "Eigen found at $($eigenDir.FullName)"
+          "EIGEN3_INCLUDE_DIR=$($eigenDir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      # ---------- Deps: macOS ----------
-      - name: Install deps (macOS)
-        if: ${{ startsWith(matrix.triplet, 'macos') }}
+      # ------------------ macOS Dependencies ------------------
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
         shell: bash
         run: |
-          brew update
+          echo "Installing Homebrew packages..."
           brew install cmake eigen ninja
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy delocate
-          # Build SWIG 4.1.1 (avoid 4.3 issues for Chrono bindings)
+
+          echo "Building SWIG 4.1.1 from source to avoid newer version issues..."
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
           cd swig-4.1.1 && ./configure && make -j2 && sudo make install && cd ..
           swig -version
 
-      # ---------- Configure / Build ----------
-      - name: Configure (CMake, Python module only)
+      # ------------------ Configure and Build ------------------
+      - name: Configure (CMake)
         shell: bash
         run: |
           PYEXE=$(python -c "import sys; print(sys.executable)")
+          CMAKE_FLAGS=""
 
-          # Mac-specific arch & deployment target for correct wheel tags
-          MAC_FLAGS=""
-          if [[ "${{ matrix.triplet }}" == "macos-x86_64" ]]; then
+          # Set macOS-specific flags for universal wheels
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
             export MACOSX_DEPLOYMENT_TARGET=11
-            MAC_FLAGS="-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11"
-          elif [[ "${{ matrix.triplet }}" == "macos-arm64" ]]; then
-            export MACOSX_DEPLOYMENT_TARGET=11
-            MAC_FLAGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11"
+            if [[ "${{ matrix.triplet }}" == "macos-x86_64" ]]; then
+              CMAKE_FLAGS="-DCMAKE_OSX_ARCHITECTURES=x86_64"
+            elif [[ "${{ matrix.triplet }}" == "macos-arm64" ]]; then
+              CMAKE_FLAGS="-DCMAKE_OSX_ARCHITECTURES=arm64"
+            fi
+            CMAKE_FLAGS="$CMAKE_FLAGS -DCMAKE_OSX_DEPLOYMENT_TARGET=11"
           fi
 
-          # Windows: Eigen hints + inject system libs (winsock + winmm)
-          if [[ "${{ matrix.triplet }}" == "win" ]]; then
-            EIGEN_FLAGS="-DEIGEN3_INCLUDE_DIR=${EIGEN3_INCLUDE_DIR} -DEigen3_ROOT=${Eigen3_ROOT}"
-            # These flags add ws2_32.lib + Winmm.lib to ALL link steps (exe/shared/module)
-            WIN_LINK_FLAGS='-DCMAKE_EXE_LINKER_FLAGS="/DEFAULTLIB:ws2_32.lib /DEFAULTLIB:Winmm.lib" -DCMAKE_SHARED_LINKER_FLAGS="/DEFAULTLIB:ws2_32.lib /DEFAULTLIB:Winmm.lib" -DCMAKE_MODULE_LINKER_FLAGS="/DEFAULTLIB:ws2_32.lib /DEFAULTLIB:Winmm.lib"'
-          else
-            EIGEN_FLAGS=""
-            WIN_LINK_FLAGS=""
+          # Set Eigen path hint for Windows
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            CMAKE_FLAGS="$CMAKE_FLAGS -DEIGEN3_INCLUDE_DIR=${EIGEN3_INCLUDE_DIR}"
           fi
 
           cmake -S . -B build -G "Ninja" \
@@ -107,10 +122,245 @@ jobs:
             -DCH_ENABLE_SENSOR=OFF \
             -DCH_ENABLE_POSTPROCESS=OFF \
             -DCH_ENABLE_OPENGL=OFF \
+            -DCH_USE_TBB=OFF \
+            -DCH_USE_MKL=OFF \
+            -DCH_USE_CUDA=OFF \
+            -DPython3_EXECUTABLE="$PYEXE" \
+            $CMAKE_FLAGS
+
+      - name: Build (Ninja)
+        shell: bash
+        # Use --verbose to get detailed compiler output, which is crucial for debugging
+        run: cmake --build build --config Release --parallel --verbose
+
+      - name: Install to staging directory
+        shell: bash
+        run: |
+          cmake --install build --config Release --prefix "$PWD/stage"
+          echo "---- Staged files (sample) ----"
+          find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
+
+      - name: Verify Python extension was built
+        id: verify
+        shell: bash
+        run: |
+          # Find the installed pychrono module directory
+          PYCHRONO_DIR=$(find "$PWD/stage" -type d -name pychrono -print -quit)
+
+          if [[ -z "$PYCHRONO_DIR" ]]; then
+            echo "::error::Could not find 'pychrono' directory in the installation path."
+            echo "Listing contents of '$PWD/stage' to debug:"
+            ls -R "$PWD/stage"
+            exit 1
+          fi
+          echo "Found pychrono at: $PYCHrono_DIR"
+
+          # Check for the native extension file (.pyd, .so, .dylib)
+          EXT_FILE=$(find "$PYCHRONO_DIR" -maxdepth 1 -type f \( -name "*.so" -o -name "*.pyd" -o -name "*.dylib" \) -print -quit)
+          if [[ -z "$EXT_FILE" ]]; then
+            echo "::error::Native Python extension (.pyd, .so, .dylib) not found in $PYCHRONO_DIR!"
+            exit 1
+          fi
+
+          echo "Successfully found native extension: $EXT_FILE"
+          echo "pychrono_dir=$PYCHRONO_DIR" >> "$GITHUB_OUTPUT"
+
+      # ------------------ Package Wheel ------------------
+      - name: Create Python wheel
+        shell: bash
+        run: |
+          PYCHRONO_DIR="${{ steps.verify.outputs.pychrono_dir }}"
+          rm -rf pkg && mkdir -p pkg
+
+          # Move the compiled module into a temporary packaging directory
+          mv "$PYCHRONO_DIR" pkg/
+
+          # Create a minimal pyproject.toml
+          cat > pkg/pyproject.toml << EOF
+          [build-system]
+          requires = ["setuptools>=68", "wheel"]
+          build-backend = "setuptools.build_meta"
+
+          [project]
+          name = "pychrono"
+          version = "${{ env.CHRONO_REF }}"
+          description = "PyChrono binary wheel (built from Project Chrono)"
+          requires-python = ">=${{ env.PY_VER }},<$(python -c 'v = "${{ env.PY_VER }}".split("."); print(f"{v[0]}.{int(v[1])+1}")')"
+          EOF
+
+          # Create a setup.py to mark the wheel as containing native binaries
+          cat > pkg/setup.py << EOF
+          from setuptools import setup
+          from setuptools.dist import Distribution
+
+          class BinaryDistribution(Distribution):
+              def has_ext_modules(self):
+                  return True
+
+          setup(
+              packages=["pychrono"],
+              include_package_data=True,
+              distclass=BinaryDistribution
+          )
+          EOF
+
+          # Build the wheel
+          python -m build --wheel --outdir wheelhouse pkg
+
+      # ------------------ Repair Wheel ------------------
+      - name: Repair wheel (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # Find all unique directories with dynamic libraries in the install prefix
+          LIB_ARGS=""
+          while IFS= read -r d; do
+            LIB_ARGS+=" -L $d"
+          done < <(find "$PWD/stage" -type f -name "*.dylib" -exec dirname {} \; | sort -u)
+
+          echo "Running delocate-wheel to bundle external libraries..."
+          delocate-wheel -v -w wheelhouse $LIB_ARGS wheelhouse/*.whl
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pychrono-wheel-cp${{ env.PY_VER }}-${{ matrix.triplet }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+
+  # ====================================================================
+  # == Job: Build for Linux using a manylinux container
+  # ====================================================================
+  build_linux_manylinux:
+    name: Build (Linux manylinux2014 cp${{ env.PY_VER }})
+    runs-on: ubuntu-22.04
+    container: quay.io/pypa/manylinux2014_x86_64
+
+    steps:
+      - name: Checkout Chrono source code
+        uses: actions/checkout@v4
+        with:
+          repository: projectchrono/chrono
+          ref: ${{ env.CHRONO_REF }}
+
+      - name: Prepare toolchain and dependencies
+        shell: bash
+        run: |
+          PY_BIN_DIR="/opt/python/cp${{ env.PY_VER | replace '.','' }}-cp${{ env.PY_VER | replace '.','' }}/bin"
+          export PATH="$PY_BIN_DIR:$PATH"
+
+          python -m pip install --upgrade pip
+          python -m pip install "setuptools>=68" wheel build numpy cmake ninja auditwheel
+
+          echo "Building SWIG 4.1.1 from source..."
+          yum -y install make gcc gcc-c++ pcre2-devel
+          curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
+          tar xzf swig-4.1.1.tar.gz
+          cd swig-4.1.1 && ./configure && make -j2 && make install && cd ..
+          swig -version
+
+          echo "Downloading Eigen..."
+          curl -L -o eigen-3.4.0.tar.gz https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+          tar xzf eigen-3.4.0.tar.gz
+          export EIGEN_DIR="$PWD/eigen-3.4.0"
+          echo "EIGEN_DIR=$EIGEN_DIR" >> "$GITHUB_ENV"
+
+      - name: Configure and Build
+        shell: bash
+        run: |
+          PY_BIN_DIR="/opt/python/cp${{ env.PY_VER | replace '.','' }}-cp${{ env.PY_VER | replace '.','' }}/bin"
+          export PATH="$PY_BIN_DIR:$PATH"
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCH_ENABLE_MODULE_PYTHON=ON \
+            -DCH_ENABLE_VEHICLE=OFF \
+            -DCH_ENABLE_IRRLICHT=OFF \
+            -DCH_ENABLE_VSG=OFF \
+            -DCH_ENABLE_SENSOR=OFF \
+            -DCH_ENABLE_POSTPROCESS=OFF \
+            -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS $WIN_LINK_FLAGS $MAC_FLAGS
+            -DPython3_EXECUTABLE="$PY_BIN_DIR/python" \
+            -DEIGEN3_INCLUDE_DIR="$EIGEN_DIR"
 
-      - name: Build
-        run: cmake --build build --config Release --parallel
+          # Use --verbose to get detailed compiler output
+          cmake --build build --config Release --parallel --verbose
+          cmake --install build --config Release --prefix "$PWD/stage"
 
-      ... # [rest of workflow unchanged, as in your supplied script]
+      - name: Create and Repair Wheel
+        shell: bash
+        run: |
+          PY_BIN_DIR="/opt/python/cp${{ env.PY_VER | replace '.','' }}-cp${{ env.PY_VER | replace '.','' }}/bin"
+          export PATH="$PY_BIN_DIR:$PATH"
+
+          PYCHRONO_DIR=$(find "$PWD/stage" -type d -name pychrono -print -quit)
+          if [[ -z "$PYCHRONO_DIR" ]]; then
+            echo "::error::Could not find 'pychrono' directory in the installation path."
+            ls -R "$PWD/stage"
+            exit 1
+          fi
+
+          rm -rf pkg && mkdir -p pkg wheelhouse
+          mv "$PYCHRONO_DIR" pkg/
+
+          # Create packaging files (pyproject.toml, setup.py)
+          # (Using the same content as the desktop job)
+          cat > pkg/pyproject.toml << EOF
+          [build-system]
+          requires = ["setuptools>=68", "wheel"]
+          build-backend = "setuptools.build_meta"
+          [project]
+          name = "pychrono"
+          version = "${{ env.CHRONO_REF }}"
+          description = "PyChrono binary wheel (built from Project Chrono)"
+          requires-python = ">=${{ env.PY_VER }},<$(python -c 'v = "${{ env.PY_VER }}".split("."); print(f"{v[0]}.{int(v[1])+1}")')"
+          EOF
+          cat > pkg/setup.py << EOF
+          from setuptools import setup
+          from setuptools.dist import Distribution
+          class BinaryDistribution(Distribution):
+              def has_ext_modules(self): return True
+          setup(packages=["pychrono"], include_package_data=True, distclass=BinaryDistribution)
+          EOF
+
+          # Build and repair the wheel
+          python -m build --wheel --outdir dist pkg
+          auditwheel repair dist/*.whl -w wheelhouse
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pychrono-wheel-cp${{ env.PY_VER }}-linux
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # ====================================================================
+  # == Job: Collect all wheels and create a GitHub Release
+  # ====================================================================
+  release:
+    name: Create GitHub Release
+    needs: [build_desktop, build_linux_manylinux]
+    # Only run this job if the triggering event was a tag push
+    if: startsWith(github.ref, 'refs/tags/pychrono-')
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Use a pattern to download all wheel artifacts from previous jobs
+          pattern: pychrono-wheel-cp*
+          merge-multiple: true # Merge into a single directory
+          path: wheelhouse
+
+      - name: List collected wheels
+        run: ls -l wheelhouse
+
+      - name: Create Release and Upload Wheels
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wheelhouse/*.whl
+          # Automatically generate release notes from commits since the last tag
+          generate_release_notes: true
