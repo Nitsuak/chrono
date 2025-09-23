@@ -247,7 +247,6 @@ jobs:
         run: |
           set -e
           mkdir -p wheelhouse
-          # Build -L arguments for all unique dirs containing dylibs
           LIB_ARGS=""
           while IFS= read -r d; do
             LIB_ARGS="$LIB_ARGS -L $d"
@@ -275,48 +274,55 @@ jobs:
           path: wheelhouse/*.whl
           if-no-files-found: error
 
-  # ------------------ Linux manylinux2014 (build inside Docker, keep actions on host) ------------------
+  # ------------------ Linux manylinux2014 (proper manylinux tag) ------------------
   build_linux_manylinux:
     name: Build (Linux manylinux2014 cp311)
     runs-on: ubuntu-22.04
+    container: quay.io/pypa/manylinux2014_x86_64
+    continue-on-error: true  # <-- allow the workflow to continue if this job fails
     steps:
+      - name: Bootstrap tools required by checkout (inside CentOS7 container)
+        shell: bash
+        run: |
+          yum -y install git tar gzip ca-certificates
+          update-ca-trust
+          git --version
+          tar --version
+
+      # Use Node16 actions in CentOS7 container
       - name: Checkout Chrono
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           repository: projectchrono/chrono
           ref: ${{ env.CHRONO_REF }}
 
-      - name: Create manylinux build script
+      - name: Allow git safe.directory (defensive)
+        shell: bash
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Prepare toolchain & Python 3.11
         shell: bash
         run: |
-          mkdir -p ci
-          cat > ci/build_manylinux.sh << 'EOF'
-          set -euo pipefail
-          # Work inside /ws (mounted workspace)
-          cd /ws
           export PY="/opt/python/cp311-cp311/bin/python"
           export PATH="/opt/python/cp311-cp311/bin:$PATH"
-
-          # Minimal tools + build deps inside container
-          yum -y install git tar gzip ca-certificates make gcc gcc-c++ pcre2-devel
-          update-ca-trust
-
-          # Python tooling
           $PY -m pip install --upgrade pip
           $PY -m pip install "setuptools>=68" wheel build numpy cmake ninja auditwheel
-
-          # SWIG 4.1.1 (bindings expect this)
+          # SWIG 4.1.1 from source
+          yum -y install make gcc gcc-c++ pcre2-devel
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
           tar xzf swig-4.1.1.tar.gz
           cd swig-4.1.1 && ./configure && make -j2 && make install && cd ..
           swig -version
-
           # Eigen headers
           curl -L -o eigen-3.4.0.tar.gz https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
           tar xzf eigen-3.4.0.tar.gz
-          export EIGEN_DIR="/ws/eigen-3.4.0"
+          export EIGEN_DIR="$PWD/eigen-3.4.0"
 
-          # Configure, build, install
+      - name: Configure & build Chrono (Python module)
+        shell: bash
+        run: |
+          export PY="/opt/python/cp311-cp311/bin/python"
+          export PATH="/opt/python/cp311-cp311/bin:$PATH"
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_STANDARD=17 \
@@ -331,73 +337,83 @@ jobs:
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
             -DPython3_EXECUTABLE="$PY" \
             -DEIGEN3_INCLUDE_DIR="$EIGEN_DIR" -DEigen3_ROOT="$EIGEN_DIR"
-
           cmake --build build --config Release --parallel
-          cmake --install build --config Release --prefix "/ws/stage"
+          cmake --install build --config Release --prefix "$PWD/stage"
+          echo "---- staged (sample) ----"
+          find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
 
-          # Verify native extension exists
-          DEST="/ws/stage/share/chrono/python/pychrono"
+      - name: Verify pychrono native extension built
+        shell: bash
+        run: |
+          DEST="$PWD/stage/share/chrono/python/pychrono"
           if [ ! -d "$DEST" ]; then
-            DEST="$(find /ws/stage -type d -name pychrono -print -quit || true)"
+            DEST="$(find "$PWD/stage" -type d -name pychrono -print -quit || true)"
           fi
           echo "Checking for native extension in: $DEST"
           EXT_FOUND=$(find "$DEST" -type f -name "*.so" | head -n1)
           if [ -z "$EXT_FOUND" ]; then
             echo "ERROR: No native Python extension was built in pychrono."
             exit 1
+          else
+            echo "Found Python native extension: $EXT_FOUND"
           fi
 
-          # Package wheel from installed files
-          rm -rf /ws/pkg /ws/wheelhouse && mkdir -p /ws/pkg/pychrono /ws/wheelhouse
-          cp -R "$DEST/." /ws/pkg/pychrono/
-
-          cat > /ws/pkg/pyproject.toml << 'PYPRJ'
-          [build-system]
-          requires = ["setuptools>=68", "wheel"]
-          build-backend = "setuptools.build_meta"
-
-          [project]
-          name = "pychrono"
-          version = "0.0.0+local"
-          description = "PyChrono binary wheel (built from Project Chrono)"
-          requires-python = ">=3.11,<3.12"
-          PYPRJ
-
-          cat > /ws/pkg/setup.py << 'SETUPPY'
-          from setuptools import setup
-          from setuptools.dist import Distribution
-
-          class BinDist(Distribution):
-              def has_ext_modules(self):
-                  return True
-
-          setup(
-              name="pychrono",
-              version="0.0.0+local",
-              packages=["pychrono"],
-              package_dir={"pychrono": "pychrono"},
-              include_package_data=True,
-              distclass=BinDist,
-          )
-          SETUPPY
-
-          $PY -m build -w /ws/pkg
-
-          # Repair to manylinux_2_17 and copy to /ws/wheelhouse
-          auditwheel show /ws/pkg/dist/*.whl || true
-          auditwheel repair /ws/pkg/dist/*.whl -w /ws/wheelhouse
-          chmod -R a+rX /ws/wheelhouse
-          ls -al /ws/wheelhouse
-          EOF
-          chmod +x ci/build_manylinux.sh
-
-      - name: Run manylinux2014 container build (Docker)
+      - name: Package wheel (from Chrono install dir)
         shell: bash
         run: |
-          docker run --rm -v "${{ github.workspace }}:/ws" -w /ws quay.io/pypa/manylinux2014_x86_64 /bin/bash -lc "bash ci/build_manylinux.sh"
+          set -euo pipefail
+          DEST="$PWD/stage/share/chrono/python/pychrono"
+          if [ ! -d "$DEST" ]; then
+            DEST=$(find "$PWD/stage" -type d -name pychrono -print -quit || true)
+          fi
+          if [ -z "$DEST" ]; then
+            echo "ERROR: pychrono not found under stage/"
+            find "$PWD/stage" -maxdepth 6 -print | head -n 300 || true
+            exit 1
+          fi
+          rm -rf pkg wheelhouse && mkdir -p pkg/pychrono wheelhouse
+          cp -R "$DEST/." pkg/pychrono/
+          printf '%s\n' \
+            '[build-system]' \
+            'requires = ["setuptools>=68", "wheel"]' \
+            'build-backend = "setuptools.build_meta"' \
+            '' \
+            '[project]' \
+            'name = "pychrono"' \
+            'version = "0.0.0+local"' \
+            'description = "PyChrono binary wheel (built from Project Chrono)"' \
+            'requires-python = ">=3.11,<3.12"' \
+            > pkg/pyproject.toml
+          printf '%s\n' \
+            'from setuptools import setup' \
+            'from setuptools.dist import Distribution' \
+            '' \
+            'class BinDist(Distribution):' \
+            '    def has_ext_modules(self):' \
+            '        return True' \
+            '' \
+            'setup(' \
+            '    name="pychrono",' \
+            '    version="0.0.0+local",' \
+            '    packages=["pychrono"],' \
+            '    package_dir={"pychrono": "pychrono"},' \
+            '    include_package_data=True,' \
+            '    distclass=BinDist,' \
+            ')' \
+            > pkg/setup.py
+          /opt/python/cp311-cp311/bin/python -m build -w pkg
 
-      - name: Upload Linux wheel artifact
-        uses: actions/upload-artifact@v4
+      - name: auditwheel repair → manylinux_2_17
+        shell: bash
+        run: |
+          set -e
+          mkdir -p wheelhouse
+          auditwheel show pkg/dist/*.whl || true
+          auditwheel repair pkg/dist/*.whl -w wheelhouse
+          ls -al wheelhouse
+
+      - name: Upload per-OS artifact (linux)
+        uses: actions/upload-artifact@v3  # Node16 for CentOS7 container
         with:
           name: pychrono-wheel-cp311-linux
           path: wheelhouse/*.whl
@@ -407,15 +423,64 @@ jobs:
   collect:
     name: Collect wheels
     needs: [build_desktop, build_linux_manylinux]
+    if: ${{ always() }}  # run even if some builds failed
     runs-on: ubuntu-22.04
+    outputs:
+      has_wheels: ${{ steps.check.outputs.has_wheels }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Prepare dir
+        run: mkdir -p wheelhouse
+
+      # Download each known artifact; tolerate missing ones
+      - name: Download win wheels
+        uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          pattern: pychrono-wheel-cp311-*
-          merge-multiple: true
+          name: pychrono-wheel-cp311-win
           path: wheelhouse
-      - run: ls -al wheelhouse
-      - uses: actions/upload-artifact@v4
+
+      - name: Download macOS x86_64 wheels
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pychrono-wheel-cp311-macos-x86_64
+          path: wheelhouse
+
+      - name: Download macOS arm64 wheels
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pychrono-wheel-cp311-macos-arm64
+          path: wheelhouse
+
+      - name: Download linux wheels
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: pychrono-wheel-cp311-linux
+          path: wheelhouse
+
+      - name: List collected wheels
+        run: |
+          echo "Collected:"
+          ls -al wheelhouse || true
+          ls -1 wheelhouse/*.whl 2>/dev/null || true
+
+      - name: Check if any wheels exist
+        id: check
+        shell: bash
+        run: |
+          count=$(ls -1 wheelhouse/*.whl 2>/dev/null | wc -l || true)
+          if [ "${count}" -gt 0 ]; then
+            echo "has_wheels=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_wheels=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Wheel count: ${count}"
+
+      - name: Upload combined artifact
+        if: ${{ steps.check.outputs.has_wheels == 'true' }}
+        uses: actions/upload-artifact@v4
         with:
           name: pychrono-wheels-cp311
           path: wheelhouse/*.whl
@@ -423,7 +488,7 @@ jobs:
   release:
     name: Release wheels
     needs: collect
-    if: startsWith(github.ref, 'refs/tags/pychrono-')
+    if: ${{ startsWith(github.ref, 'refs/tags/pychrono-') && needs.collect.outputs.has_wheels == 'true' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@v4
