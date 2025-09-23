@@ -88,11 +88,14 @@ jobs:
             MAC_FLAGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11"
           fi
 
-          # Windows: add Eigen hints
+          # Windows: Eigen hints + inject system libs (winsock + winmm)
           if [[ "${{ matrix.triplet }}" == "win" ]]; then
             EIGEN_FLAGS="-DEIGEN3_INCLUDE_DIR=${EIGEN3_INCLUDE_DIR} -DEigen3_ROOT=${Eigen3_ROOT}"
+            # These flags add ws2_32.lib + Winmm.lib to ALL link steps (exe/shared/module)
+            WIN_LINK_FLAGS='-DCMAKE_EXE_LINKER_FLAGS="/DEFAULTLIB:ws2_32.lib /DEFAULTLIB:Winmm.lib" -DCMAKE_SHARED_LINKER_FLAGS="/DEFAULTLIB:ws2_32.lib /DEFAULTLIB:Winmm.lib" -DCMAKE_MODULE_LINKER_FLAGS="/DEFAULTLIB:ws2_32.lib /DEFAULTLIB:Winmm.lib"'
           else
             EIGEN_FLAGS=""
+            WIN_LINK_FLAGS=""
           fi
 
           cmake -S . -B build -G "Ninja" \
@@ -105,7 +108,7 @@ jobs:
             -DCH_ENABLE_POSTPROCESS=OFF \
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS $MAC_FLAGS
+            -DPython3_EXECUTABLE="$PYEXE" $EIGEN_FLAGS $WIN_LINK_FLAGS $MAC_FLAGS
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -226,7 +229,6 @@ jobs:
           delocate-listdeps pkg/dist/*.whl || true
 
           echo "Running: delocate-wheel -v -w wheelhouse $LIB_ARGS pkg/dist/*.whl"
-          # Use eval so the -L list expands properly
           if eval "delocate-wheel -v -w wheelhouse $LIB_ARGS pkg/dist/*.whl"; then
             echo "Delocate success."
           else
