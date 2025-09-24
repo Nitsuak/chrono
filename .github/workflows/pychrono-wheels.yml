@@ -48,7 +48,7 @@ jobs:
           choco install swig --version=4.1.1 -y --no-progress
           python -m pip install --upgrade pip
           python -m pip install "setuptools>=68" wheel "scikit-build-core>=0.9" ninja numpy
-          # Eigen headers (header-only)
+          # Eigen (header-only)
           $zip = "eigen-3.4.0.zip"
           Invoke-WebRequest -Uri "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip" -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath .
@@ -65,13 +65,14 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_CXX_STANDARD=17 `
             -DCMAKE_VERBOSE_MAKEFILE=ON `
+            -DBUILD_SHARED_LIBS=ON `
             -DCH_ENABLE_MODULE_PYTHON=ON `
             -DCH_ENABLE_VEHICLE=OFF -DCH_ENABLE_IRRLICHT=OFF -DCH_ENABLE_VSG=OFF `
             -DCH_ENABLE_SENSOR=OFF -DCH_ENABLE_POSTPROCESS=OFF -DCH_ENABLE_OPENGL=OFF `
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF `
-            -DPython3_EXECUTABLE="$PYEXE" `
+            -DPython3_EXECUTABLE="$PYEXE" -DPYTHON_EXECUTABLE="$PYEXE" `
             -DEIGEN3_INCLUDE_DIR="${env:EIGEN3_INCLUDE_DIR}" -DEigen3_ROOT="${env:Eigen3_ROOT}"
-          cmake --system-information | Select-String "CMAKE_GENERATOR|CMAKE_CXX_COMPILER"
+          cmake --system-information | Select-String "CMAKE_GENERATOR|CMAKE_CXX_COMPILER|Python3_EXECUTABLE"
 
       - name: Build
         shell: pwsh
@@ -193,12 +194,13 @@ setup(
           export MACOSX_DEPLOYMENT_TARGET=11
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DBUILD_SHARED_LIBS=ON \
             -DCH_ENABLE_MODULE_PYTHON=ON \
             -DCH_ENABLE_VEHICLE=OFF -DCH_ENABLE_IRRLICHT=OFF -DCH_ENABLE_VSG=OFF \
             -DCH_ENABLE_SENSOR=OFF -DCH_ENABLE_POSTPROCESS=OFF -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11 \
-            -DPython3_EXECUTABLE="$PYEXE"
+            -DPython3_EXECUTABLE="$PYEXE" -DPYTHON_EXECUTABLE="$PYEXE"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -298,12 +300,13 @@ setup(
           export MACOSX_DEPLOYMENT_TARGET=11
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17 -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DBUILD_SHARED_LIBS=ON \
             -DCH_ENABLE_MODULE_PYTHON=ON \
             -DCH_ENABLE_VEHICLE=OFF -DCH_ENABLE_IRRLICHT=OFF -DCH_ENABLE_VSG=OFF \
             -DCH_ENABLE_SENSOR=OFF -DCH_ENABLE_POSTPROCESS=OFF -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11 \
-            -DPython3_EXECUTABLE="$PYEXE"
+            -DPython3_EXECUTABLE="$PYEXE" -DPYTHON_EXECUTABLE="$PYEXE"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -370,7 +373,7 @@ setup(
     name: Build (Linux manylinux2014 cp311)
     runs-on: ubuntu-22.04
     container: quay.io/pypa/manylinux2014_x86_64
-    continue-on-error: true   # allow pipeline to proceed if this job fails
+    continue-on-error: true   # let pipeline proceed if this fails
     steps:
       - name: Preflight
         shell: bash
@@ -384,7 +387,7 @@ setup(
           yum -y install git tar gzip ca-certificates
           update-ca-trust
 
-      # Node20 doesn't run on CentOS7; use Node16 actions
+      # Node20 doesn't run on CentOS7; use Node16 action here
       - name: Checkout Chrono
         uses: actions/checkout@v3
         with:
@@ -401,7 +404,7 @@ setup(
           export PY="/opt/python/cp311-cp311/bin/python"
           export PATH="/opt/python/cp311-cp311/bin:$PATH"
           $PY -m pip install --upgrade pip
-          # Pin CMake <3.27 to avoid CMP0148 breakage; rest of tools as usual
+          # Pin cmake to avoid CMP0148 breakage; rest of tools as usual
           $PY -m pip install "cmake<3.27" ninja "setuptools>=68" wheel build numpy auditwheel
           yum -y install make gcc gcc-c++ pcre2-devel
           curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
@@ -411,6 +414,21 @@ setup(
           curl -L -o eigen-3.4.0.tar.gz https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
           tar xzf eigen-3.4.0.tar.gz
           export EIGEN_DIR="$PWD/eigen-3.4.0"
+          # Discover Python/NumPy includes for CMake hints
+          PY_INC=$($PY - <<'PY'
+import sysconfig
+print(sysconfig.get_paths()["include"])
+PY
+)
+          NP_INC=$($PY - <<'PY'
+import numpy as np
+print(np.get_include())
+PY
+)
+          echo "PY_INC=$PY_INC"
+          echo "NP_INC=$NP_INC"
+          echo "PY_INC=$PY_INC" >> $GITHUB_ENV
+          echo "NP_INC=$NP_INC" >> $GITHUB_ENV
 
       - name: Configure
         shell: bash
@@ -421,18 +439,25 @@ setup(
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_STANDARD=17 \
             -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DBUILD_SHARED_LIBS=ON \
             -DCH_ENABLE_MODULE_PYTHON=ON \
             -DCH_ENABLE_VEHICLE=OFF -DCH_ENABLE_IRRLICHT=OFF -DCH_ENABLE_VSG=OFF \
             -DCH_ENABLE_SENSOR=OFF -DCH_ENABLE_POSTPROCESS=OFF -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-            -DPython3_EXECUTABLE="$PY" \
+            -DPython3_EXECUTABLE="$PY" -DPYTHON_EXECUTABLE="$PY" \
+            -DPython3_ROOT_DIR="/opt/python/cp311-cp311" \
+            -DPython3_FIND_STRATEGY=LOCATION -DPython3_FIND_FRAMEWORK=NEVER -DPython3_FIND_REGISTRY=NEVER \
+            -DPython3_NumPy_INCLUDE_DIRS="${NP_INC}" \
             -DEIGEN3_INCLUDE_DIR="$EIGEN_DIR" -DEigen3_ROOT="$EIGEN_DIR" \
+            -DSWIG_EXECUTABLE="/usr/local/bin/swig" \
             -DCMAKE_POLICY_DEFAULT_CMP0148=OLD
 
       - name: Show CMake configure logs (always)
         if: ${{ always() }}
         shell: bash
         run: |
+          cmake --version || true
+          which cmake || true
           if [ -f build/CMakeFiles/CMakeError.log ]; then
             echo "=== CMakeError.log ==="
             sed -n '1,200p' build/CMakeFiles/CMakeError.log || true
