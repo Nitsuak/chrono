@@ -55,7 +55,6 @@ jobs:
           if (-not $eigenDir) { Write-Error "Eigen folder not found"; exit 1 }
           "Eigen3_ROOT=$($eigenDir.FullName)"       | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "EIGEN3_INCLUDE_DIR=$($eigenDir.FullName)"| Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
       - name: MSVC Dev Cmd (x64)
         if: ${{ matrix.triplet == 'win' }}
         uses: ilammy/msvc-dev-cmd@v1
@@ -76,7 +75,6 @@ jobs:
           tar xzf swig-4.1.1.tar.gz
           cd swig-4.1.1 && ./configure && make -j2 && sudo make install && cd ..
           swig -version
-
       # ---------- Configure ----------
       - name: Configure (Windows)
         if: ${{ matrix.triplet == 'win' }}
@@ -98,7 +96,6 @@ jobs:
             -DPython3_EXECUTABLE="$PYEXE" `
             -DEIGEN3_INCLUDE_DIR="${env:EIGEN3_INCLUDE_DIR}" -DEigen3_ROOT="${env:Eigen3_ROOT}"
           cmake --system-information | Select-String "CMAKE_GENERATOR|CMAKE_CXX_COMPILER"
-
       - name: Configure (macOS)
         if: ${{ startsWith(matrix.triplet, 'macos') }}
         shell: bash
@@ -125,7 +122,6 @@ jobs:
             -DCH_ENABLE_OPENGL=OFF \
             -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
             -DPython3_EXECUTABLE="$PYEXE" $MAC_FLAGS
-
       # ---------- Build ----------
       - name: MSVC Dev Cmd (x64) for build
         if: ${{ matrix.triplet == 'win' }}
@@ -139,14 +135,12 @@ jobs:
         run: |
           cmake --build build --config Release --parallel
           if (Test-Path build\CMakeFiles\CMakeError.log) { Write-Host "=== CMakeError.log ==="; Get-Content build\CMakeFiles\CMakeError.log }
-
       - name: Build (macOS)
         if: ${{ startsWith(matrix.triplet, 'macos') }}
         shell: bash
         run: |
           cmake --build build --config Release --parallel
           if [ -f build/CMakeFiles/CMakeError.log ]; then echo "=== CMakeError.log ==="; cat build/CMakeFiles/CMakeError.log || true; fi
-
       # ---------- Install to staging prefix ----------
       - name: Install to staging prefix
         shell: bash
@@ -154,7 +148,6 @@ jobs:
           cmake --install build --config Release --prefix "$PWD/stage"
           echo "---- staged files (sample) ----"
           find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
-
       # ---------- Verify pychrono extension presence ----------
       - name: Verify pychrono native extension built
         shell: bash
@@ -175,7 +168,6 @@ jobs:
           else
             echo "Found Python native extension: $EXT_FOUND"
           fi
-
       # ---------- Determine pychrono install dir ----------
       - name: Determine pychrono install dir
         id: inst
@@ -198,7 +190,6 @@ jobs:
           fi
           echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
           echo "PYCHRONO_DIR: $DEST"
-
       # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
         shell: bash
@@ -239,7 +230,6 @@ jobs:
             > pkg/setup.py
           python -m pip install --upgrade build wheel
           python -m build -w pkg
-
       # ---------- Fix wheels per-OS ----------
       - name: Delocate (macOS)
         if: ${{ startsWith(matrix.triplet, 'macos') }}
@@ -259,14 +249,12 @@ jobs:
             cp pkg/dist/*.whl wheelhouse/
           fi
           ls -al wheelhouse
-
       - name: Move wheel (Windows)
         if: ${{ matrix.triplet == 'win' }}
         shell: bash
         run: |
           mkdir -p wheelhouse
           cp pkg/dist/*.whl wheelhouse/
-
       - name: Upload per-OS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -278,130 +266,136 @@ jobs:
   build_linux_manylinux:
     name: Build (Linux manylinux2014 cp311)
     runs-on: ubuntu-22.04
-    continue-on-error: true  # run workflow even if this job fails
+    container: quay.io/pypa/manylinux2014_x86_64
+    continue-on-error: true  # <-- allow the workflow to continue if this job fails
     steps:
-      - name: Checkout Chrono (host)
-        uses: actions/checkout@v4
+      - name: Bootstrap tools required by checkout (inside CentOS7 container)
+        shell: bash
+        run: |
+          yum -y install git tar gzip ca-certificates
+          update-ca-trust
+          git --version
+          tar --version
+      # Use Node16 actions in CentOS7 container
+      - name: Checkout Chrono
+        uses: actions/checkout@v3
         with:
           repository: projectchrono/chrono
           ref: ${{ env.CHRONO_REF }}
 
-      - name: Build inside manylinux2014 container (Docker)
+      - name: Allow git safe.directory (defensive)
+        shell: bash
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Prepare toolchain & Python 3.11
+        shell: bash
+        run: |
+          export PY="/opt/python/cp311-cp311/bin/python"
+          export PATH="/opt/python/cp311-cp311/bin:$PATH"
+          $PY -m pip install --upgrade pip
+          $PY -m pip install "setuptools>=68" wheel build numpy cmake ninja auditwheel
+          # SWIG 4.1.1 from source
+          yum -y install make gcc gcc-c++ pcre2-devel
+          curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
+          tar xzf swig-4.1.1.tar.gz
+          cd swig-4.1.1 && ./configure && make -j2 && make install && cd ..
+          swig -version
+          # Eigen headers
+          curl -L -o eigen-3.4.0.tar.gz https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+          tar xzf eigen-3.4.0.tar.gz
+          export EIGEN_DIR="$PWD/eigen-3.4.0"
+      - name: Configure & build Chrono (Python module)
+        shell: bash
+        run: |
+          export PY="/opt/python/cp311-cp311/bin/python"
+          export PATH="/opt/python/cp311-cp311/bin:$PATH"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DCH_ENABLE_MODULE_PYTHON=ON \
+            -DCH_ENABLE_VEHICLE=OFF \
+            -DCH_ENABLE_IRRLICHT=OFF \
+            -DCH_ENABLE_VSG=OFF \
+            -DCH_ENABLE_SENSOR=OFF \
+            -DCH_ENABLE_POSTPROCESS=OFF \
+            -DCH_ENABLE_OPENGL=OFF \
+            -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
+            -DPython3_EXECUTABLE="$PY" \
+            -DEIGEN3_INCLUDE_DIR="$EIGEN_DIR" -DEigen3_ROOT="$EIGEN_DIR"
+          cmake --build build --config Release --parallel
+          cmake --install build --config Release --prefix "$PWD/stage"
+          echo "---- staged (sample) ----"
+          find "$PWD/stage" -maxdepth 5 -type f | head -n 100 || true
+      - name: Verify pychrono native extension built
+        shell: bash
+        run: |
+          DEST="$PWD/stage/share/chrono/python/pychrono"
+          if [ ! -d "$DEST" ]; then
+            DEST="$(find "$PWD/stage" -type d -name pychrono -print -quit || true)"
+          fi
+          echo "Checking for native extension in: $DEST"
+          EXT_FOUND=$(find "$DEST" -type f -name "*.so" | head -n1)
+          if [ -z "$EXT_FOUND" ]; then
+            echo "ERROR: No native Python extension was built in pychrono."
+            exit 1
+          else
+            echo "Found Python native extension: $EXT_FOUND"
+          fi
+      - name: Package wheel (from Chrono install dir)
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm \
-            -v "$PWD":/work \
-            -w /work \
-            quay.io/pypa/manylinux2014_x86_64 \
-            bash -lc '
-              set -euo pipefail
-              # basic tools and compilers
-              yum -y install git tar gzip ca-certificates curl make gcc gcc-c++ pcre2-devel
-              update-ca-trust
-
-              # Python 3.11 toolchain in manylinux image
-              export PY="/opt/python/cp311-cp311/bin/python"
-              export PATH="/opt/python/cp311-cp311/bin:$PATH"
-              $PY -m pip install --upgrade pip
-              $PY -m pip install "setuptools>=68" wheel build numpy cmake ninja auditwheel
-
-              # SWIG 4.1.1
-              curl -L -o swig-4.1.1.tar.gz https://downloads.sourceforge.net/project/swig/swig/swig-4.1.1/swig-4.1.1.tar.gz
-              tar xzf swig-4.1.1.tar.gz
-              pushd swig-4.1.1
-              ./configure
-              make -j2
-              make install
-              popd
-              swig -version
-
-              # Eigen headers
-              curl -L -o eigen-3.4.0.tar.gz https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
-              tar xzf eigen-3.4.0.tar.gz
-              export EIGEN_DIR="/work/eigen-3.4.0"
-
-              # Configure & build Chrono (Python module)
-              cmake -S . -B build -G Ninja \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DCMAKE_CXX_STANDARD=17 \
-                -DCMAKE_VERBOSE_MAKEFILE=ON \
-                -DCH_ENABLE_MODULE_PYTHON=ON \
-                -DCH_ENABLE_VEHICLE=OFF \
-                -DCH_ENABLE_IRRLICHT=OFF \
-                -DCH_ENABLE_VSG=OFF \
-                -DCH_ENABLE_SENSOR=OFF \
-                -DCH_ENABLE_POSTPROCESS=OFF \
-                -DCH_ENABLE_OPENGL=OFF \
-                -DCH_USE_TBB=OFF -DCH_USE_MKL=OFF -DCH_USE_CUDA=OFF \
-                -DPython3_EXECUTABLE="$PY" \
-                -DEIGEN3_INCLUDE_DIR="$EIGEN_DIR" -DEigen3_ROOT="$EIGEN_DIR"
-              cmake --build build --config Release --parallel
-              cmake --install build --config Release --prefix "/work/stage"
-
-              echo "---- staged (sample) ----"
-              find "/work/stage" -maxdepth 5 -type f | head -n 100 || true
-
-              # Verify native extension exists
-              DEST="/work/stage/share/chrono/python/pychrono"
-              if [ ! -d "$DEST" ]; then
-                DEST="$(find "/work/stage" -type d -name pychrono -print -quit || true)"
-              fi
-              echo "Checking for native extension in: $DEST"
-              EXT_FOUND=$(find "$DEST" -type f -name "*.so" | head -n1 || true)
-              if [ -z "$EXT_FOUND" ]; then
-                echo "ERROR: No native Python extension was built in pychrono."
-                exit 1
-              else
-                echo "Found Python native extension: $EXT_FOUND"
-              fi
-
-              # Package wheel
-              rm -rf /work/pkg /work/wheelhouse && mkdir -p /work/pkg/pychrono /work/wheelhouse
-              cp -R "$DEST/." /work/pkg/pychrono/
-
-              # pyproject.toml
-              cat > /work/pkg/pyproject.toml <<EOF
-              [build-system]
-              requires = ["setuptools>=68", "wheel"]
-              build-backend = "setuptools.build_meta"
-
-              [project]
-              name = "pychrono"
-              version = "0.0.0+local"
-              description = "PyChrono binary wheel (built from Project Chrono)"
-              requires-python = ">=3.11,<3.12"
-              EOF
-
-              # setup.py (mark as binary wheel)
-              cat > /work/pkg/setup.py << "EOF"
-              from setuptools import setup
-              from setuptools.dist import Distribution
-
-              class BinDist(Distribution):
-                  def has_ext_modules(self):
-                      return True
-
-              setup(
-                  name="pychrono",
-                  version="0.0.0+local",
-                  packages=["pychrono"],
-                  package_dir={"pychrono": "pychrono"},
-                  include_package_data=True,
-                  distclass=BinDist,
-              )
-              EOF
-
-              /opt/python/cp311-cp311/bin/python -m build -w /work/pkg
-
-              # Repair to manylinux_2_17
-              auditwheel show /work/pkg/dist/*.whl || true
-              auditwheel repair /work/pkg/dist/*.whl -w /work/wheelhouse
-              ls -al /work/wheelhouse
-            '
-
+          DEST="$PWD/stage/share/chrono/python/pychrono"
+          if [ ! -d "$DEST" ]; then
+            DEST=$(find "$PWD/stage" -type d -name pychrono -print -quit || true)
+          fi
+          if [ -z "$DEST" ]; then
+            echo "ERROR: pychrono not found under stage/"
+            find "$PWD/stage" -maxdepth 6 -print | head -n 300 || true
+            exit 1
+          fi
+          rm -rf pkg wheelhouse && mkdir -p pkg/pychrono wheelhouse
+          cp -R "$DEST/." pkg/pychrono/
+          printf '%s\n' \
+            '[build-system]' \
+            'requires = ["setuptools>=68", "wheel"]' \
+            'build-backend = "setuptools.build_meta"' \
+            '' \
+            '[project]' \
+            'name = "pychrono"' \
+            'version = "0.0.0+local"' \
+            'description = "PyChrono binary wheel (built from Project Chrono)"' \
+            'requires-python = ">=3.11,<3.12"' \
+            > pkg/pyproject.toml
+          printf '%s\n' \
+            'from setuptools import setup' \
+            'from setuptools.dist import Distribution' \
+            '' \
+            'class BinDist(Distribution):' \
+            '    def has_ext_modules(self):' \
+            '        return True' \
+            '' \
+            'setup(' \
+            '    name="pychrono",' \
+            '    version="0.0.0+local",' \
+            '    packages=["pychrono"],' \
+            '    package_dir={"pychrono": "pychrono"},' \
+            '    include_package_data=True,' \
+            '    distclass=BinDist,' \
+            ')' \
+            > pkg/setup.py
+          /opt/python/cp311-cp311/bin/python -m build -w pkg
+      - name: auditwheel repair → manylinux_2_17
+        shell: bash
+        run: |
+          set -e
+          mkdir -p wheelhouse
+          auditwheel show pkg/dist/*.whl || true
+          auditwheel repair pkg/dist/*.whl -w wheelhouse
+          ls -al wheelhouse
       - name: Upload per-OS artifact (linux)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3  # Node16 for CentOS7 container
         with:
           name: pychrono-wheel-cp311-linux
           path: wheelhouse/*.whl
@@ -453,7 +447,6 @@ jobs:
           echo "Collected:"
           ls -al wheelhouse || true
           ls -1 wheelhouse/*.whl 2>/dev/null || true
-
       - name: Check if any wheels exist
         id: check
         shell: bash
@@ -465,7 +458,6 @@ jobs:
             echo "has_wheels=false" >> "$GITHUB_OUTPUT"
           fi
           echo "Wheel count: ${count}"
-
       - name: Upload combined artifact
         if: ${{ steps.check.outputs.has_wheels == 'true' }}
         uses: actions/upload-artifact@v4
