@@ -199,7 +199,7 @@ jobs:
           echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
           echo "PYCHRONO_DIR: $DEST"
 
-      # ---------- Package as a wheel ----------
+      # ---------- Package as a wheel (includes binaries in package_data) ----------
       - name: Create packaging skeleton
         shell: bash
         run: |
@@ -219,7 +219,7 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
-          # setup.py (mark as binary wheel)
+          # setup.py (explicitly include native/binary files)
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
@@ -234,6 +234,7 @@ jobs:
             '    packages=["pychrono"],' \
             '    package_dir={"pychrono": "pychrono"},' \
             '    include_package_data=True,' \
+            '    package_data={"pychrono": ["**/*.pyd","**/*.dll","**/*.so","**/*.dylib","**/*.dat","**/*.txt"]},' \
             '    distclass=BinDist,' \
             ')' \
             > pkg/setup.py
@@ -241,12 +242,41 @@ jobs:
           python -m build -w pkg
 
       # ---------- Fix wheels per-OS ----------
+      - name: Repair Windows wheel with delvewheel
+        if: ${{ matrix.triplet == 'win' }}
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade delvewheel
+          # Bundle dependency DLLs from stage/bin and stage/lib into the wheel
+          $addPaths = "$PWD\stage\bin;$PWD\stage\lib"
+          python -m delvewheel show pkg\dist\*.whl
+          python -m delvewheel repair --add-path "$addPaths" --wheel-dir wheelhouse pkg\dist\*.whl
+
+      - name: Inspect repaired Windows wheel
+        if: ${{ matrix.triplet == 'win' }}
+        shell: pwsh
+        run: |
+          Get-ChildItem wheelhouse\*.whl | ForEach-Object {
+            Write-Host "Wheel:" $_.FullName "Size:" $_.Length "bytes"
+          }
+          python - << 'PY'
+import glob, zipfile
+ws = sorted(glob.glob('wheelhouse/*.whl'))
+print("Found wheels:", ws)
+if ws:
+    with zipfile.ZipFile(ws[-1]) as z:
+        for n in z.namelist():
+            if n.endswith(('.pyd','.dll')) or 'delvewheel' in n:
+                print("  ", n)
+PY
+
       - name: Delocate (macOS)
         if: ${{ startsWith(matrix.triplet, 'macos') }}
         shell: bash
         run: |
           set -e
           mkdir -p wheelhouse
+          # Build -L arguments for all unique dirs containing dylibs
           LIB_ARGS=""
           while IFS= read -r d; do
             LIB_ARGS="$LIB_ARGS -L $d"
@@ -260,8 +290,8 @@ jobs:
           fi
           ls -al wheelhouse
 
-      - name: Move wheel (Windows)
-        if: ${{ matrix.triplet == 'win' }}
+      - name: Move wheel (non-repaired platforms)
+        if: ${{ matrix.triplet != 'win' && !startsWith(matrix.triplet, 'macos') }}
         shell: bash
         run: |
           mkdir -p wheelhouse
@@ -279,7 +309,7 @@ jobs:
     name: Build (Linux manylinux2014 cp311)
     runs-on: ubuntu-22.04
     container: quay.io/pypa/manylinux2014_x86_64
-    continue-on-error: true  # <-- allow the workflow to continue if this job fails
+    continue-on-error: true  # allow workflow to continue even if this job fails
     steps:
       - name: Bootstrap tools required by checkout (inside CentOS7 container)
         shell: bash
@@ -289,7 +319,7 @@ jobs:
           git --version
           tar --version
 
-      # Use Node16 actions in CentOS7 container
+      # Use Node16 actions in CentOS7 to avoid Node20/glibc mismatch
       - name: Checkout Chrono
         uses: actions/checkout@v3
         with:
@@ -398,6 +428,7 @@ jobs:
             '    packages=["pychrono"],' \
             '    package_dir={"pychrono": "pychrono"},' \
             '    include_package_data=True,' \
+            '    package_data={"pychrono": ["**/*.pyd","**/*.dll","**/*.so","**/*.dylib","**/*.dat","**/*.txt"]},' \
             '    distclass=BinDist,' \
             ')' \
             > pkg/setup.py
