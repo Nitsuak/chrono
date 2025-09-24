@@ -199,7 +199,7 @@ jobs:
           echo "pychrono_dir=$DEST" >> "$GITHUB_OUTPUT"
           echo "PYCHRONO_DIR: $DEST"
 
-      # ---------- Package as a wheel (includes binaries in package_data) ----------
+      # ---------- Package as a wheel ----------
       - name: Create packaging skeleton
         shell: bash
         run: |
@@ -219,7 +219,7 @@ jobs:
             'description = "PyChrono binary wheel (built from Project Chrono)"' \
             'requires-python = ">=3.11,<3.12"' \
             > pkg/pyproject.toml
-          # setup.py (explicitly include native/binary files)
+          # setup.py (include native/binary files explicitly)
           printf '%s\n' \
             'from setuptools import setup' \
             'from setuptools.dist import Distribution' \
@@ -247,7 +247,6 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade delvewheel
-          # Bundle dependency DLLs from stage/bin and stage/lib into the wheel
           $addPaths = "$PWD\stage\bin;$PWD\stage\lib"
           python -m delvewheel show pkg\dist\*.whl
           python -m delvewheel repair --add-path "$addPaths" --wheel-dir wheelhouse pkg\dist\*.whl
@@ -261,10 +260,12 @@ jobs:
           }
           python - << 'PY'
 import glob, zipfile
-ws = sorted(glob.glob('wheelhouse/*.whl'))
-print("Found wheels:", ws)
-if ws:
-    with zipfile.ZipFile(ws[-1]) as z:
+wheels = sorted(glob.glob('wheelhouse/*.whl'))
+print("Wheels:", wheels)
+if wheels:
+    w = wheels[-1]
+    print("== Contents of", w, "==")
+    with zipfile.ZipFile(w) as z:
         for n in z.namelist():
             if n.endswith(('.pyd','.dll')) or 'delvewheel' in n:
                 print("  ", n)
@@ -290,7 +291,7 @@ PY
           fi
           ls -al wheelhouse
 
-      - name: Move wheel (non-repaired platforms)
+      - name: Move wheel (other OSes)
         if: ${{ matrix.triplet != 'win' && !startsWith(matrix.triplet, 'macos') }}
         shell: bash
         run: |
@@ -309,7 +310,7 @@ PY
     name: Build (Linux manylinux2014 cp311)
     runs-on: ubuntu-22.04
     container: quay.io/pypa/manylinux2014_x86_64
-    continue-on-error: true  # allow workflow to continue even if this job fails
+    continue-on-error: true  # allow the workflow to continue if this job fails
     steps:
       - name: Bootstrap tools required by checkout (inside CentOS7 container)
         shell: bash
@@ -319,7 +320,7 @@ PY
           git --version
           tar --version
 
-      # Use Node16 actions in CentOS7 to avoid Node20/glibc mismatch
+      # Use Node16 actions in CentOS7 container
       - name: Checkout Chrono
         uses: actions/checkout@v3
         with:
